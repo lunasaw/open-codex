@@ -160,15 +160,15 @@
 
 所有 CSV 均带具体方法/字段/状态，方法与事件清单附字面引用位置；字面引用只是定位线索，方法结论还需结合本报告的 Host 边界。完整二进制 Schema 保留嵌套结构，不仅靠方法名搜索。
 
-- [方法总表](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/client-methods.csv) / [545 条参数与分支](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/client-parameters.csv)
-- [反向请求](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/server-requests.csv) / [服务端通知](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/server-notifications.csv) / [客户端通知](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/client-notifications.csv)
-- [19 种会话条目](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/thread-item-types.csv) / [7 种用户输入](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/user-input-types.csv)
-- [103 个顶层设置](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/settings-top-level.csv) / [1,725 条配置路径](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/settings-fields.csv)
-- [175 个运行时开关](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/runtime-features.csv) / [185 个源码 feature 配置键](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/source-feature-keys.csv)
-- [二进制协议一致性](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/protocol-verification.json) / [原生只读探测](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/isolated-native-read-probes.json) / [运行实例](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/running-instance-snapshot.json) / [浏览器设置页](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/live-browser-settings.json) / [最终浏览器/实例复核](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/live-browser-final.json)
-- [源码快照清单](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/source-manifest.json) / [统计](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/inventory-summary.json) / [可重建清单脚本](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/build_inventory.py) / [精确原生 Schema 目录](../../../../platform-data/agent-ui-parity/20261017-native-capability-audit/native-0.163.0-schema/)
+- 方法总表（`client-methods.csv`） / 545 条参数与分支（`client-parameters.csv`）
+- 反向请求（`server-requests.csv`） / 服务端通知（`server-notifications.csv`） / 客户端通知（`client-notifications.csv`）
+- 19 种会话条目（`thread-item-types.csv`） / 7 种用户输入（`user-input-types.csv`）
+- 103 个顶层设置（`settings-top-level.csv`） / 1,725 条配置路径（`settings-fields.csv`）
+- 175 个运行时开关（`runtime-features.csv`） / 185 个源码 feature 配置键（`source-feature-keys.csv`）
+- 二进制协议一致性（`protocol-verification.json`） / 原生只读探测（`isolated-native-read-probes.json`） / 运行实例（`running-instance-snapshot.json`） / 浏览器设置页（`live-browser-settings.json`） / 最终浏览器/实例复核（`live-browser-final.json`）
+- 源码快照清单（`source-manifest.json`） / 统计（`inventory-summary.json`） / 可重建清单脚本（`build_inventory.py`） / 精确原生 Schema 目录（`native-0.163.0-schema/`）
 
-原始证据保存在 Git 忽略的 platform-data 审计目录。本文和下面的 103 项清单保存在源码文档中；若需跨机器复核，应一并保存审计目录。
+原始证据保存在原 Galatea 工作区的 `platform-data/agent-ui-parity/20261017-native-capability-audit/`，由 Git 忽略，不随独立仓库分发。上述文件名是归档索引，不是本仓库内的下载链接。本文和下面的 103 项清单保存在源码文档中；若需跨机器复核，应一并保存审计目录。
 
 主要实现证据：配置编辑 [configuration-settings.tsx](../frontend/src/configuration-settings.tsx)、会话设置 [model-settings.tsx](../frontend/src/model-settings.tsx)、集成 [integrations.tsx](../frontend/src/integrations.tsx)、运行时页 [runtime-settings.tsx](../frontend/src/runtime-settings.tsx)、Host 边界 [native.py](../src/codex_agent/native.py)、会话状态 [host.py](../src/codex_agent/host.py)、内容投影 [projection.py](../src/codex_agent/console/projection.py)、聊天白名单 [messages.ts](../frontend/src/messages.ts)。
 

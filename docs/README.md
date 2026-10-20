@@ -1,6 +1,6 @@
 # 文档导航
 
-当前架构为通用 Codex Host，配置版本 `codex-agent/v2`。本目录描述完整重构后的实现，旧业务适配模式已删除。Codex 是唯一 Agent Runtime；整仓集成边界见 [Codex 与 Galatea 架构](../../../doc/agent-galatea.md)。
+当前架构为通用 Codex Host，配置版本 `codex-agent/v2`。本目录描述完整重构后的实现，旧业务适配模式已删除。Codex 是唯一 Agent Runtime；整仓集成边界见 [Codex 与 Galatea 架构](https://github.com/lunasaw/Galatea/blob/master/doc/agent-galatea.md)。
 
 - [架构与两阶段边界](01-architecture.md)
 - [原生协议](02-app-server-protocol.md)
@@ -20,3 +20,5 @@
 - [Skill、MCP 与插件管理](16-integrations.md)
 - [Web 能力对齐与验收](17-web-capability-parity.md)
 - [通用 MCP Apps Host](18-mcp-apps.md)
+
+独立仓库开发、验证和 Galatea submodule 更新见 [仓库维护](23-repository-maintenance.md)。

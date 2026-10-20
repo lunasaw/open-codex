@@ -22,4 +22,4 @@ MCP 可以部署在远端，也可以作为独立 stdio 子进程启动；两者
 
 当前交付通用执行链路；业务适配、阶段和产物投影属于后续接入范围，不把业务流程改写为 Host 固定状态机。自定义节点可由 Skill 描述并由 Agent 判断进入、回退和继续。
 
-仓库没有内置 Galatea Provider；需要单独配置外部 MCP，或实现并验收独立 Provider。项目 YAML 固定入口与 MCP Campaign 服务是两条独立治理路径，不能混用状态与授权。Host 不消费 `wait_external` 作为调度事件，通用会话恢复也不等于外部训练恢复。完整边界见 [Codex 与 Galatea 架构](../../../doc/agent-galatea.md)。
+仓库没有内置 Galatea Provider；需要单独配置外部 MCP，或实现并验收独立 Provider。项目 YAML 固定入口与 MCP Campaign 服务是两条独立治理路径，不能混用状态与授权。Host 不消费 `wait_external` 作为调度事件，通用会话恢复也不等于外部训练恢复。完整边界见 [Codex 与 Galatea 架构](https://github.com/lunasaw/Galatea/blob/master/doc/agent-galatea.md)。

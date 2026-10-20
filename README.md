@@ -1,17 +1,19 @@
-# Codex Agent Host
+# Open Codex
 
 基于原生 `codex app-server` 的通用 Agent 与网页工作台。Agent 自主选择 Skill、工具和下一步行动；Host 负责进程、会话、审批、调用记录和恢复，不定义训练阶段或业务节点。
 
+独立仓库：[lunasaw/open-codex](https://github.com/lunasaw/open-codex)。
 可独立运行，通过配置连接 Skill、自定义 Tool、外部 MCP 与 Apps。
+Python 包名 `codex-agent-host`、命令 `codex-agent` 和配置版本 `codex-agent/v2` 保持兼容。
 已支持工具调用后自动展示任务 App、同一聊天内更新和刷新恢复；
-可选的 [Galatea 任务 App](../galatea-app/docs/00-product-overview.md) 提供动态阶段、进度、指标与产物展示。
+可选的 [Galatea 任务 App](https://github.com/lunasaw/Galatea/blob/master/agents/galatea-app/docs/00-product-overview.md) 提供动态阶段、进度、指标与产物展示。
 
-仓库整体职责见 [Codex 与 Galatea 架构](../../doc/agent-galatea.md)。本组件不内置 Galatea Adapter；
+仓库整体职责见 [Codex 与 Galatea 架构](https://github.com/lunasaw/Galatea/blob/master/doc/agent-galatea.md)。本组件不内置 Galatea Adapter；
 项目 YAML 固定入口与 MCP Campaign 服务分别维护业务授权和执行证据。旧训练 Skill 包的
 `wait_external` 不会触发 Host 自动轮询或恢复 Campaign，使用该约定需另行实现并验收外部编排。
 
 快速导航：[产品界面导览](#product-ui) · [启动](#启动) · [接入能力](#接入能力) ·
-[项目与权限交互细节](#项目与权限交互) · [Galatea App 产品介绍](../galatea-app/docs/00-product-overview.md) · [验证](#验证) · [技术文档目录](docs/README.md)
+[项目与权限交互细节](#项目与权限交互) · [Galatea App 产品介绍](https://github.com/lunasaw/Galatea/blob/master/agents/galatea-app/docs/00-product-overview.md) · [验证](#验证) · [技术文档目录](docs/README.md)
 
 <a id="product-ui"></a>
 
@@ -278,15 +280,19 @@ Hooks 展示清单、来源和执行记录。远程控制、环境、插件授�
 
 ## 启动
 
-在本目录执行：
+独立克隆后启动（需要 Git 和 Conda；脚本安装 Python、Node.js 与固定版本 Codex）：
 
 ```sh
+git clone https://github.com/lunasaw/open-codex.git
+cd open-codex
 sh start.sh
 ```
 
 脚本在 `.local` 创建独立 Conda 环境，安装本项目依赖与固定版本 Codex，构建前端。首次从 `CODEX_AGENT_AUTH_DIR`（默认 `~/.codex`）复制模型连接与认证；也可提供 `OPENAI_API_KEY`。无需安装 Galatea Python 包或运行训练平台。
 
 首次生成 `.local/agent.json` 与 `.local/codex-home/config.toml`，之后保留用户编辑。`CODEX_AGENT_MODEL`、`CODEX_AGENT_WORKSPACE` 控制首次生成的模型和工作目录，`CODEX_AGENT_HOST`、`CODEX_AGENT_PORT` 控制脚本监听地址。
+首次启动默认以本仓库根目录作为工作目录；在 Galatea 中使用时，可显式设置
+`CODEX_AGENT_WORKSPACE=/absolute/path/to/Galatea`。已有 `.local/agent.json` 的工作目录保持不变。
 
 也可以在任意目录安装、使用独立配置启动：
 
@@ -384,3 +390,12 @@ npm run build
 真实原生协议验证通过 `CODEX_TEST_RUNTIME_PACKAGE=/absolute/path/runtime` 开启，使用本地模拟 Responses 服务与 MCP echo 进程，不调用付费模型或实际训练。完整说明见 [测试验收](docs/09-test-acceptance.md)。
 
 开发模式不要求部署接纳文件。正式启动仍要求 runtime 来源、协议、扩展和恢复证据；参见 [生产状态](docs/12-production-readiness.md)。
+
+## 独立维护与 Galatea 集成
+
+本项目从 Galatea 的 `agents/codex-app-server` 提取，保留 22 个相关历史提交。
+提取来源为 Galatea `16a4d2918c27ab3df7b55803732af0aeb1abb5b5`；
+后续通用 Host 的功能、测试和版本在本仓库维护。Galatea 通过同名路径的 Git submodule
+固定到已验证提交，升级需在 Galatea 提交新的指针。详情见 [仓库维护](docs/23-repository-maintenance.md)。
+
+许可沿用来源项目的 [Apache License 2.0](LICENSE.txt)。

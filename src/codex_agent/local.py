@@ -104,7 +104,7 @@ def prepare(project: Path, binary: Path):
         raw['codex'].pop('model_api_key_file', None)
         raw['console']['host'] = '0.0.0.0'
         raw['console']['storage'] = {'backend': 'sqlite', 'retention': 'persistent'}
-        raw['paths']['workspace_dir'] = os.environ.get('CODEX_AGENT_WORKSPACE', str(project.parents[1]))
+        raw['paths']['workspace_dir'] = os.environ.get('CODEX_AGENT_WORKSPACE', str(project))
         path.write_text(json.dumps(raw, indent=2) + '\n')
         path.chmod(0o600)
     raw = json.loads(path.read_text())

@@ -76,6 +76,16 @@ class SourceStartupTests(unittest.TestCase):
         self.assertFalse((config.config_dir / 'platform-state').exists())
         self.assertIn('runtime_compatibility_sha256', source_manifest(config))
 
+    def test_default_workspace_is_the_standalone_project(self):
+        self.assertEqual(self.config().workspace_dir, self.project)
+
+    def test_explicit_workspace_is_preserved_on_later_startups(self):
+        workspace = Path(self.temp.name) / 'separate-workspace'
+        workspace.mkdir()
+        with patch.dict(os.environ, {'CODEX_AGENT_WORKSPACE': str(workspace)}):
+            self.assertEqual(self.config().workspace_dir, workspace)
+        self.assertEqual(self.config().workspace_dir, workspace)
+
     def test_upgrade_preserves_state_settings_and_backs_up_previous_config(self):
         config = self.config()
         path = config.config_dir / 'agent.json'

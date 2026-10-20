@@ -10,3 +10,13 @@
 /dist/
 /src/*.egg-info/
 /.local/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+node_modules/
+.env
+.env.*
+!.env.example
+core
+core.*
