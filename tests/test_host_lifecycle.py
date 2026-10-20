@@ -70,27 +70,33 @@ class HostLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_handler_timeout_keeps_loop_responsive_and_blocks_resume(self):
         import threading
-        entered, release = threading.Event(), threading.Event()
+        entered, release = asyncio.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
         def slow(*args):
-            entered.set()
-            release.wait(2)
+            loop.call_soon_threadsafe(entered.set)
+            release.wait(30)
             return {'ok': True}
         self.host.registry.handlers['galatea_get_capabilities'] = slow
-        self.host.tool_timeout = .03
+        # Give the runner time to dispatch the worker before testing its timeout.
+        self.host.tool_timeout = 5
         session = await self.host.create_session('s')
         turn = await self.host.send_message('s', 'r', 'one')
+        call = asyncio.create_task(self.host.handle_tool_call({'id': 12, 'params': {
+            'threadId': session['thread_id'], 'turnId': turn['turn_id'], 'callId': 'slow',
+            'namespace': 'galatea', 'tool': 'galatea_get_capabilities', 'arguments': {}}}))
         try:
-            response = await self.host.handle_tool_call({'id': 12, 'params': {
-                'threadId': session['thread_id'], 'turnId': turn['turn_id'], 'callId': 'slow',
-                'namespace': 'galatea', 'tool': 'galatea_get_capabilities', 'arguments': {}}})
-            self.assertTrue(entered.is_set())
+            await asyncio.wait_for(entered.wait(), 10)
+            self.assertFalse(call.done(), 'the event loop must progress while the handler is blocked')
+            response = await asyncio.wait_for(call, 10)
             error = json.loads(response['result']['contentItems'][0]['text'])['error']
+            self.assertEqual(error['category'], 'tool-timeout')
             self.assertEqual(error['state_changed'], 'unknown')
             self.assertEqual(self.host.get_session('s')['status'], 'recovery_required')
             with self.assertRaises(HostNotReady):
                 await self.host.resume('s')
         finally:
             release.set()
+            await asyncio.gather(call, return_exceptions=True)
 
     async def test_completed_reconciler_task_fails_readiness(self):
         self.host._reconcile_task.cancel()
