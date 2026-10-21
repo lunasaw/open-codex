@@ -28,6 +28,7 @@ node ../tests/test_sidebar_resize_browser.cjs
 node ../tests/test_copy_reply_browser.cjs
 node ../tests/test_thread_export_browser.cjs
 node ../tests/test_progressive_loading_browser.cjs
+node ../tests/test_connection_recovery_browser.cjs
 node ../tests/test_immediate_send_browser.cjs
 node ../tests/test_conversation_panels.cjs
 node ../tests/test_review_picker_browser.cjs
@@ -110,6 +111,18 @@ MCP Apps 验收覆盖消息/上下文桥、工具可见性和作用域、确认/
 `test_immediate_steer_browser.cjs` 在回答进行时挂起补充请求，验证 Enter 和发送按钮即时回显、
 输入框清空、原生 clientUserMessageId 去重、失败重试身份保持，以及跨聊天草稿隔离。
 `store.test.ts` 另验证首条消息不等待历史和目录加载、两种回执顺序、创建失败重试与切换时的模型归属。
+
+`test_connection_recovery_browser.cjs` 模拟 SSE 连接保持打开但不再向前端传输数据，
+验证 45 秒超时重连和游标补发、每 5 分钟定时更新连接、草稿与阅读位置保留、
+页面返回/网络恢复时立即重连、离线重试、恢复后发送、切换聊天及页面缓存恢复。
+`stream-connection.test.ts` 验证连接响应前超时、心跳保活、定时更新与定时器/监听器清理；
+`node --test tests/test_console_transport.cjs` 另检查心跳注释和未完成帧均更新活动时间。
+
+2026-10-21 连接恢复验证：137 项前端单元测试、3 项传输测试、TypeScript/构建、
+连接恢复与渐进加载浏览器回归通过；Python 共 245 项，227 项通过、18 项因运行环境条件跳过，
+未启用额外的真实原生运行时测试。浏览器验收使用独立 fixture 与隔离构建。
+完整 `test_console_browser.cjs` 在侧栏“会话更多选项”被标题按钮遮挡处失败；
+同一测试在修改前的内置前端包中复现相同失败，未将该套用例记为通过。
 
 `test_html_preview_browser.cjs` 验证 HTML/HTM 在文件面板直接渲染、内联脚本与样式、
 源码切换、行号定位、重新读取、草稿保留及手机交互，并检查父页面与 Host API 隔离。

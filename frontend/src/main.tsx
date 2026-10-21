@@ -310,9 +310,14 @@ function Workspace() {
   useEffect(() => {
     void store.init();
     const close = () => store.dispose();
+    const restore = (event: PageTransitionEvent) => {
+      if (event.persisted) void store.init();
+    };
     window.addEventListener("pagehide", close);
+    window.addEventListener("pageshow", restore);
     return () => {
       window.removeEventListener("pagehide", close);
+      window.removeEventListener("pageshow", restore);
       store.dispose();
     };
   }, []);

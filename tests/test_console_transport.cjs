@@ -22,3 +22,17 @@ test('cursor updates only after a handler completes; incomplete final frame is n
   assert.deepEqual(parser.feed('data: unfinished'), []);
   assert.throws(() => compareCursor('old:1', 'new:2'));
 });
+
+test('heartbeat comments and partial frames count as connection activity', async () => {
+  let activity = 0;
+  const frames = [];
+  const stream = new ReadableStream({start(controller) {
+    for (const chunk of [': keepalive\n\n', 'event: cursor\ndata:', ' {"cursor":"e:1"}\n\n'])
+      controller.enqueue(new TextEncoder().encode(chunk));
+    controller.close();
+  }});
+  await consumeSSE(stream, frame => frames.push(frame), () => activity++);
+  assert.equal(activity, 3);
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].event, 'cursor');
+});

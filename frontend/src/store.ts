@@ -1,6 +1,7 @@
 import { nativeNotice, invalidatesNativeResources, type NativeNotice } from "./native-notifications";
 import { exactSlashCommand, initPrompt } from "./slash-commands";
 import { visibleEfforts } from "./configuration-data";
+import { StreamConnection } from "./stream-connection";
 import type {
   Capabilities,
   EventPage,
@@ -35,6 +36,7 @@ declare global {
         event: string;
         data: string;
       }) => Promise<void> | void,
+      onActivity?: () => void,
     ): Promise<void>;
     compareCursor(a: string, b: string): number;
   };
@@ -1202,80 +1204,82 @@ export class ConsoleStore {
     controller: AbortController,
   ) {
     let delay = 300;
-    while (!controller.signal.aborted && version === this.generation) {
-      try {
-        const path = global
-          ? "/api/events/stream"
-          : `/api/sessions/${encodeURIComponent(id!)}/events`;
-        const response = await fetch(
-          `${path}?after=${encodeURIComponent(cursor)}`,
-          { signal: controller.signal },
-        );
-        if (!response.ok)
-          throw new ApiError((await response.json()).error, response.status);
-        this.patch({ streamError: "" });
-        await ConsoleTransport.consumeSSE(response.body!, (frame) => {
-          if (controller.signal.aborted || version !== this.generation) return;
-          const data = JSON.parse(frame.data);
-          if (frame.event === "snapshot_required")
-            throw new ApiError("SNAPSHOT_REQUIRED", 409);
-          if (
-            frame.event === "observation" &&
-            ConsoleTransport.compareCursor(data.event_id, cursor) > 0
-          ) {
-            if (
-              this.state.eventLive &&
-              (!global || !data.session_id) &&
-              Object.entries(this.filter).every(
-                ([key, value]) => !value || data[key] === value,
+    const connection = new StreamConnection(controller.signal);
+    try {
+      while (!controller.signal.aborted && version === this.generation) {
+        try {
+          await connection.run(async (signal, activity) => {
+            const path = global
+              ? "/api/events/stream"
+              : `/api/sessions/${encodeURIComponent(id!)}/events`;
+            const response = await fetch(
+              `${path}?after=${encodeURIComponent(cursor)}`,
+              { signal },
+            );
+            if (signal.aborted || version !== this.generation) return;
+            if (!response.ok)
+              throw new ApiError((await response.json()).error, response.status);
+            this.patch({ streamError: "" });
+            await ConsoleTransport.consumeSSE(response.body!, (frame) => {
+              if (signal.aborted || version !== this.generation) return;
+              delay = 300;
+              const data = JSON.parse(frame.data);
+              if (frame.event === "snapshot_required")
+                throw new ApiError("SNAPSHOT_REQUIRED", 409);
+              if (
+                frame.event === "observation" &&
+                ConsoleTransport.compareCursor(data.event_id, cursor) > 0
+              ) {
+                if (
+                  this.state.eventLive &&
+                  (!global || !data.session_id) &&
+                  Object.entries(this.filter).every(
+                    ([key, value]) => !value || data[key] === value,
+                  )
+                ) {
+                  this.patch({ events: [...this.state.events, data].slice(-200) });
+                }
+                const notice = nativeNotice(data);
+                if (notice && !this.state.nativeNotices.some((n) => n.id === notice.id)) this.patch({ nativeNotices: [...this.state.nativeNotices, notice].slice(-30) });
+                if (invalidatesNativeResources(data)) {
+                  if (typeof window !== "undefined") window.dispatchEvent(new Event("codex-native-resources-changed"));
+                  if (["project/changed", "thread/project/updated"].includes(data.method)) void this.refreshProjects().catch(this.fail);
+                  if (["account/updated", "account/login/completed"].includes(data.method)) void this.refreshRuntimeDefaults().catch(this.fail);
+                }
+                cursor = data.event_id;
+                if (data.method === "thread/queue/changed")
+                  this.patch({ queueRevision: this.state.queueRevision + 1 });
+                this.schedule();
+              } else if (
+                frame.event === "cursor" &&
+                ConsoleTransport.compareCursor(data.cursor, cursor) >= 0
               )
-            ) {
-              this.patch({ events: [...this.state.events, data].slice(-200) });
-            }
-            const notice = nativeNotice(data);
-            if (notice && !this.state.nativeNotices.some((n) => n.id === notice.id)) this.patch({ nativeNotices: [...this.state.nativeNotices, notice].slice(-30) });
-            if (invalidatesNativeResources(data)) {
-              if (typeof window !== "undefined") window.dispatchEvent(new Event("codex-native-resources-changed"));
-              if (["project/changed", "thread/project/updated"].includes(data.method)) void this.refreshProjects().catch(this.fail);
-              if (["account/updated", "account/login/completed"].includes(data.method)) void this.refreshRuntimeDefaults().catch(this.fail);
-            }
-            cursor = data.event_id;
-            if (data.method === "thread/queue/changed")
-              this.patch({ queueRevision: this.state.queueRevision + 1 });
-            this.schedule();
-          } else if (
-            frame.event === "cursor" &&
-            ConsoleTransport.compareCursor(data.cursor, cursor) >= 0
-          )
-            cursor = data.cursor;
-          else if (frame.event === "status" && this.state.health)
-            this.patch({ health: { ...this.state.health, observation: data } });
-        });
-        delay = 300;
-      } catch (error) {
-        if (controller.signal.aborted || version !== this.generation) return;
-        if (
-          error instanceof ApiError &&
-          ["EPOCH_MISMATCH", "CURSOR_AHEAD", "SNAPSHOT_REQUIRED"].includes(
-            error.code,
-          )
-        ) {
-          if (error.code === "EPOCH_MISMATCH") this.patch({ reset: true });
-          await this.select(id, global);
-          return;
+                cursor = data.cursor;
+              else if (frame.event === "status" && this.state.health)
+                this.patch({ health: { ...this.state.health, observation: data } });
+            }, activity);
+          });
+          delay = 300;
+        } catch (error) {
+          if (controller.signal.aborted || version !== this.generation) return;
+          if (
+            error instanceof ApiError &&
+            ["EPOCH_MISMATCH", "CURSOR_AHEAD", "SNAPSHOT_REQUIRED"].includes(
+              error.code,
+            )
+          ) {
+            if (error.code === "EPOCH_MISMATCH") this.patch({ reset: true });
+            await this.select(id, global);
+            return;
+          }
+          if (!connection.refreshRequested)
+            this.patch({ streamError: "连接暂时中断，正在重新连接…" });
         }
-        this.patch({ streamError: "连接暂时中断，正在重新连接…" });
+        await connection.wait(delay);
+        delay = Math.min(delay * 2, 5000);
       }
-      await new Promise<void>((resolve) => {
-        const done = () => {
-          clearTimeout(timer);
-          controller.signal.removeEventListener("abort", done);
-          resolve();
-        };
-        const timer = setTimeout(done, delay);
-        controller.signal.addEventListener("abort", done, { once: true });
-      });
-      delay = Math.min(delay * 2, 5000);
+    } finally {
+      connection.dispose();
     }
   }
   async older() {

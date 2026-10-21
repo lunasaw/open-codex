@@ -27,11 +27,12 @@
       return frames;
     }
   }
-  async function consumeSSE(body, onFrame) {
+  async function consumeSSE(body, onFrame, onActivity = () => {}) {
     const reader = body.getReader(), decoder = new TextDecoder(), parser = new SSEParser();
     try {
       while (true) {
         const {value, done} = await reader.read();
+        if (!done && value.length) onActivity();
         const text = done ? decoder.decode() : decoder.decode(value, {stream: true});
         for (const frame of parser.feed(text)) await onFrame(frame);
         if (done) break;
