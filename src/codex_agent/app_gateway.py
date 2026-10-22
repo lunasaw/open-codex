@@ -82,6 +82,41 @@ class AppGateway:
             workspace_refs,
         )
 
+    @staticmethod
+    def _automatic_confirmation(session):
+        settings = {**session.get("settings", {}), **session.get("turn_settings", {})}
+        if settings.get("permissions"):
+            return None
+        sandbox_policy = settings.get("sandboxPolicy") or {}
+        sandbox = sandbox_policy.get("type") or settings.get("sandbox")
+        approval = settings.get("approvalPolicy")
+        reviewer = settings.get("approvalsReviewer", "user")
+        if sandbox in ("dangerFullAccess", "danger-full-access") and approval == "never":
+            return "full"
+        if (sandbox in ("workspaceWrite", "workspace-write")
+                and approval == "on-request"
+                and reviewer in ("auto_review", "guardian_subagent")
+                and not sandbox_policy.get("networkAccess")
+                and not sandbox_policy.get("writableRoots")):
+            return "auto"
+        return None
+
+    def _apply_permission_profile(self, row, session):
+        if not row["write"] or row["state"] not in {"pending", "confirmed"}:
+            return
+        # An explicit user decision remains bound to these exact arguments.
+        if row["state"] == "confirmed" and row.get("approval_source") != "permission_profile":
+            return
+        profile = self._automatic_confirmation(session)
+        if profile:
+            row.update(state="confirmed", approval_source="permission_profile",
+                       permission_profile=profile,
+                       interaction_id="interaction-auto-" + row["challenge_id"])
+        else:
+            row["state"] = "pending"
+            for field in ("approval_source", "permission_profile", "interaction_id"):
+                row.pop(field, None)
+
     def _scope(self, body):
         from .mcp_app_context import app_identity
 
@@ -106,6 +141,38 @@ class AppGateway:
         workspace = max(scopes, key=lambda scope: len(scope[0].parts))[1]
         return server, session, workspace
 
+    async def automatic_call(self, body, service):
+        """Authenticated services may request calls only for their own audience.
+
+        No caller-supplied permission profile or confirmation is authoritative.
+        The normal gateway owns signing, dispatch and durable replay protection.
+        """
+        server = self.servers.get(body.get("server"))
+        if not server or server["audience"] != service:
+            raise PermissionError("application service audience mismatch")
+        session = self.host.get_session(body["host_session_id"])
+        if not session:
+            raise ValueError("application session unavailable")
+        identity = {
+            "server": body["server"],
+            "uri": body["uri"],
+            "instanceId": "service-" + service,
+            "threadId": session["thread_id"],
+            "name": body["name"],
+            "arguments": body["arguments"],
+        }
+        _, scoped_session, _ = self._scope(identity)
+        if scoped_session["id"] != session["id"]:
+            raise ValueError("application session mismatch")
+        if not self._automatic_confirmation(scoped_session):
+            return {"state": "manual_required"}
+        challenge = self.challenge(identity)
+        if challenge["state"] == "denied":
+            return {"state": "denied"}
+        result = await self.call(challenge)
+        return {"state": "unknown" if result.get("status") == "unknown" else "completed",
+                "result": result}
+
     def challenge(self, body):
         server, session, workspace = self._scope(body)
         args = body.get("arguments") or {}
@@ -118,10 +185,11 @@ class AppGateway:
         path = f"app-calls/{key}.json"
         previous = self.host.store.read(path)
         if previous:
+            self._apply_permission_profile(previous, session)
+            self.host.store.write(path, previous)
             return {
                 k: previous[k] for k in ("call_id", "challenge_id", "state", "write", "expires_at")
             }
-        write = not server["tools"][body["name"]]["read_only"]
         row = dict(
             call_id=key,
             challenge_id=uuid.uuid4().hex,
@@ -134,6 +202,7 @@ class AppGateway:
             principal_id=self.host.principal_id,
             audience=server["audience"],
         )
+        self._apply_permission_profile(row, session)
         self.host.store.write(path, row)
         return {k: row[k] for k in ("call_id", "challenge_id", "state", "write", "expires_at")}
 
@@ -153,6 +222,8 @@ class AppGateway:
         if row["state"] in ("completed", "unknown"):
             return {"state": row["state"]}
         row["state"] = body["decision"]
+        row["approval_source"] = "user"
+        row.pop("permission_profile", None)
         row["interaction_id"] = "interaction-" + row["challenge_id"]
         self.host.store.write(path, row)
         return {"state": row["state"]}
@@ -168,10 +239,12 @@ class AppGateway:
             return row["result"]
         if row["state"] in ("dispatching", "unknown"):
             raise ValueError("application call outcome unknown; reconcile original receipt")
-        if row["state"] != "confirmed" or row["expires_at"] < time.time():
-            raise ValueError("application confirmation required")
         identity = row["identity"]
         server, session, workspace = self._scope(identity)
+        self._apply_permission_profile(row, session)
+        self.host.store.write(path, row)
+        if row["state"] != "confirmed" or row["expires_at"] < time.time():
+            raise ValueError("application confirmation required")
         proof = self.signer.sign_call(
             audience=row["audience"],
             session_id=session["id"],
@@ -182,7 +255,10 @@ class AppGateway:
             arguments=identity["arguments"],
             call_id=row["call_id"],
             interaction=(
-                {"id": row.get("interaction_id"), "decision": "confirmed"} if row["write"] else None
+                {"id": row.get("interaction_id"), "decision": "confirmed",
+                 "approval_source": row.get("approval_source", "user"),
+                 **({"permission_profile": row["permission_profile"]}
+                    if row.get("permission_profile") else {})} if row["write"] else None
             ),
         )
         # The app-supplied _meta is deliberately not copied across the trust boundary.

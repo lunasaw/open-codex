@@ -18,6 +18,7 @@ from ..host import HostNotReady, ResumeRejected
 from ..state import identifier, payload_digest
 from ..native import PROTOCOL
 from ..rpc import RpcError
+from ..conda import list_environments
 from ..mcp_app_context import app_identity, message_input, update_context
 from .projection import redact
 
@@ -231,9 +232,15 @@ class ConsoleApp:
                 raise HostNotReady('native request outcome unknown; inspect runtime before retrying')
             # Schema errors must not leave an indeterminate mutation record.
             PROTOCOL.validate(PROTOCOL.schema(body['method']), body.get('params', {}))
+            params = body.get('params', {})
+            if body.get('session_id') is not None:
+                if body['method'] not in {'command/exec', 'process/spawn'}:
+                    raise ValueError('session_id is only supported for terminal execution')
+                variables = self.host.command_environment(identifier(body['session_id']))
+                params = {**params, 'env': {**(params.get('env') or {}), **variables}}
             self.host.store.write(path, {'digest': digest, 'status': 'intent_recorded'})
             try:
-                result = await self.host.native.call(body['method'], body.get('params', {}), key)
+                result = await self.host.native.call(body['method'], params, key)
             except RpcError as exc:
                 self.host.store.write(path, {'digest': digest, 'error': redact(exc.error)[0]})
                 raise
@@ -422,6 +429,8 @@ class ConsoleApp:
             if path == '/api/native/call' and method == 'POST':
                 body = await self._body(receive)
                 return await self._send(send, 200, await self._native_write(body, headers))
+            if path == '/api/conda/environments' and method == 'GET':
+                return await self._send(send, 200, await asyncio.to_thread(list_environments))
             if path == '/api/console/status' and method == 'GET':
                 status = await self.events.status()
                 try:
@@ -467,9 +476,13 @@ class ConsoleApp:
                         view = 'messages' if action == 'messages' else 'steps' if turn_id else raw.get('view', 'all')
                         snapshot = await self.events.snapshot(SnapshotQuery(session_id, turn_id, view, query.until, query.limit, raw.get('page')))
                         return await self._send(send, 200, snapshot)
-                if method == 'POST' and action in {'messages', 'interrupt', 'close', 'resume'}:
+                if method == 'POST' and action in {'messages', 'interrupt', 'close', 'resume', 'conda-environment'}:
                     body = await self._body(receive)
                     async def invoke(key):
+                        if action == 'conda-environment':
+                            if set(body) != {'prefix'}:
+                                raise ValueError('prefix is required; use null to unbind')
+                            return await self.host.set_conda_environment(session_id, body['prefix'])
                         if action == 'messages':
                             if body.get('request_id', key) != key:
                                 raise ValueError('idempotency key mismatch')
@@ -490,7 +503,7 @@ class ConsoleApp:
         except HostNotReady as exc:
             return await self._send(send, 503, {'error': exc.code})
         except ValueError as exc:
-            return await self._send(send, 409, {'error': str(exc) if path.startswith(('/api/native/', '/api/image-generation/')) else 'invalid-or-conflicting-request'})
+            return await self._send(send, 409, {'error': str(exc) if path.startswith(('/api/native/', '/api/image-generation/', '/api/conda/')) or path.endswith('/conda-environment') else 'invalid-or-conflicting-request'})
         except (KeyError, TimeoutError):
             return await self._send(send, 409, {'error': 'invalid-or-conflicting-request'})
         except Exception:

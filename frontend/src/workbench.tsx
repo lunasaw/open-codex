@@ -44,12 +44,14 @@ import { openFile, WorkspaceFileView, type FileTarget } from "./workspace-file";
 import { consoleStore as store, statusLabel, type ConsoleState } from "./store";
 import { reviewFiles, reviewTurns } from "./workbench-data";
 import { useSidebarPanelRef } from "./sidebar-resize";
+import { CondaEnvironment } from "./conda-environment";
 
 export type WorkbenchTab =
   | "launcher"
   | "review"
   | "files"
   | "summary"
+  | "environment"
   | "background"
   | "approvals"
   | "agents"
@@ -60,6 +62,7 @@ const titles = {
   review: "更改",
   files: "文件",
   summary: "摘要",
+  environment: "运行环境",
   background: "后台终端",
   approvals: "审批记录",
   agents: "子 Agent",
@@ -309,6 +312,7 @@ function Summary({ state }: { state: ConsoleState }) {
           环境
         </h3>
         <dl>
+          <div><dt>Conda 环境</dt><dd>{session?.conda_environment?.name || "默认环境"}</dd></div>
           <div>
             <dt>工作目录</dt>
             <dd>{session?.cwd || state.nativeProtocol?.cwd || "未选择"}</dd>
@@ -511,7 +515,7 @@ export function WorkbenchPanel({
             tabs[index]?.click();
           }}
         >
-          {(["launcher", "apps", "review", "files", "summary", "background", "approvals", "agents"] as const).map((item) => (
+          {(["launcher", "apps", "review", "files", "environment", "summary", "background", "approvals", "agents"] as const).map((item) => (
             <button
               role="tab"
               key={item}
@@ -582,6 +586,12 @@ export function WorkbenchPanel({
                   Icon: Folder,
                 },
                 {
+                  id: "environment",
+                  title: "运行环境",
+                  description: "为当前会话选择 Conda 环境",
+                  Icon: Terminal,
+                },
+                {
                   id: "summary",
                   title: "摘要",
                   description: "查看环境、计划和上下文",
@@ -630,6 +640,7 @@ export function WorkbenchPanel({
           </div>
         )}
         {tab === "summary" && <Summary state={state} />}
+        {tab === "environment" && <CondaEnvironment key={state.active || "new"} state={state} />}
         {(visited.has("approvals") || tab === "approvals") && <div hidden={tab !== "approvals"} className="conversation-tool-panel"><ApprovalRecords key={state.active || "new"} state={state} /></div>}
         {tab === "agents" && <Subagents key={state.active || "new"} state={state} selectedId={selectedAgent} onSelect={setSelectedAgent} />}
         {tab === "background" && <div className="conversation-tool-panel">{state.sessions.find((s) => s.id === state.active)?.thread_id

@@ -1122,3 +1122,55 @@ test("late config reads cannot overwrite newer saved defaults", async () => {
   assert.equal(s.state.runtimeDefaults.model, "saved");
   assert.equal(s.state.preferences.model, "saved");
 });
+
+test("composer changes during a reply persist next-message settings without changing the live turn", async () => {
+  const s = make();
+  s.patch({ active: "a", sessions: [
+    { id: "a", thread_id: "native-a", status: "running", active_turn_id: "turn-a",
+      settings: { model: "thread-model", effort: "medium" },
+      turn_settings: { model: "live-model", effort: "low" } },
+    { id: "b", thread_id: "native-b", status: "ready", settings: { model: "other-model", effort: "low" } },
+  ] });
+  const calls: any[] = [];
+  globalThis.fetch = async (path, init) => {
+    if (init?.body) { calls.push(JSON.parse(init.body as string)); return json({}); }
+    return json(s.state.sessions);
+  };
+  assert.equal(s.composerSettings.model, "thread-model");
+  assert.equal(await s.updateComposerSettings({ model: "next-model", effort: "high" }), true);
+  assert.equal(calls[0].method, "thread/settings/update");
+  assert.equal(calls[0].params.threadId, "native-a");
+  assert.equal(calls[0].params.collaborationMode.settings.reasoning_effort, "high");
+  assert.deepEqual(s.state.sessions[0].turn_settings, { model: "live-model", effort: "low" });
+  assert.equal(s.composerSettings.effort, "high");
+  s.patch({ active: "b" });
+  assert.equal(s.composerSettings.model, "other-model");
+  s.patch({ active: "a", sessions: s.state.sessions.map(row => row.id === "a" ? { ...row, status: "ready", active_turn_id: null } : row) });
+  await s.send("next message");
+  const sent = calls.find(row => row.text === "next message");
+  assert.equal(sent.options.model, "next-model");
+  assert.equal(sent.options.effort, "high");
+});
+
+test("live settings require the feature and never replace next-message choices", async () => {
+  const s = make();
+  s.patch({ active: "a", sessions: [{ id: "a", thread_id: "native-a", active_turn_id: "turn-a", status: "running",
+    settings: { model: "next-model", effort: "medium" } }] });
+  const calls: any[] = [];
+  globalThis.fetch = async (_, init) => { calls.push(JSON.parse(init!.body as string)); return json({}); };
+  assert.equal(await s.updateTurnSettings("a", { effort: "high" }), false);
+  assert.equal(calls.length, 0);
+  assert.match(s.state.error, /回复中切换模型与推理强度/);
+  s.patch({ runtimeDefaults: { features: { step_model_switching: true } } });
+  assert.equal(await s.updateTurnSettings("a", { model: "live-model", effort: "low" }), true);
+  assert.equal(calls[0].method, "turn/settings/update");
+  assert.equal(calls[0].params.turnId, "turn-a");
+  assert.equal(s.composerSettings.effort, "medium");
+  assert.equal(s.state.sessions[0].turn_settings?.effort, "low");
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: "turn settings updates require the step_model_switching feature" }), { status: 422 });
+  assert.equal(await s.updateTurnSettings("a", { effort: "high" }), false);
+  assert.match(s.state.error, /新建聊天/);
+  assert.doesNotMatch(s.state.error, /422|step_model_switching/);
+  assert.equal(s.state.sessions[0].turn_settings?.effort, "low");
+  assert.equal(s.state.settingsBusy, false);
+});

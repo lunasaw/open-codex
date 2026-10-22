@@ -4,6 +4,7 @@ export type Session = {
   thread_id?: string;
   active_turn_id?: string | null;
   cwd?: string;
+  conda_environment?: { name: string; prefix: string } | null;
   name?: string;
   archived?: boolean;
   settings?: Record<string, any>;

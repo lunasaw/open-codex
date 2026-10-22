@@ -69,6 +69,7 @@ export function TerminalWorkspace({ compact = false }: { compact?: boolean }) {
     properties: Object.fromEntries(Object.entries(schema.properties || {}).filter(([key]) => !managed.includes(key))) };
   const rows = terminals.list().filter((r) => r.kind === kind);
   const current = rows.find((r) => r.id === selected) || rows.at(-1);
+  const environment = store.state.sessions.find((s) => s.id === store.state.active)?.conda_environment;
   return <section className={`terminal-workspace ${compact ? "is-compact" : ""}`} aria-label="终端工作区">
     {!compact && <h3>终端</h3>}
     <div className="terminal-kind-tabs" role="tablist" aria-label="终端类型">
@@ -86,6 +87,7 @@ export function TerminalWorkspace({ compact = false }: { compact?: boolean }) {
       const id = await terminals.start(kind, cwd, [program, ...args.split("\n").filter(Boolean)], options[kind]); setSelected(id); setCreating(false);
     }, ""); }}>
       <p className="muted">{kind === "command" ? "按服务端配置的权限运行命令。" : "直接在 app-server 主机运行，不使用 Codex 沙箱。"}</p>
+      {environment && <p className="muted">Conda 环境：{environment.name}</p>}
       <Field label="命令工作目录"><input required value={cwd} onChange={(e) => setCwd(e.target.value)} /></Field>
       <Field label="可执行程序"><input required value={program} onChange={(e) => setProgram(e.target.value)} /></Field>
       <Field label="参数（每行一个）"><textarea value={args} onChange={(e) => setArgs(e.target.value)} rows={2} /></Field>

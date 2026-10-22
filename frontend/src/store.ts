@@ -589,6 +589,23 @@ export class ConsoleStore {
     } else this.saveProjectLayout({ threadProjects: { [id]: projectId } });
     return true;
   }
+  async updateCondaEnvironment(id: string, prefix: string | null) {
+    const session = this.state.sessions.find((s) => s.id === id);
+    if (this.state.settingsBusy || this.state.submitting || this.state.creating ||
+        !session || session.active_turn_id || busyStatuses.has(session.status)) return false;
+    this.patch({ settingsBusy: true, error: "" });
+    try {
+      const updated = await api<Session>(`/api/sessions/${encodeURIComponent(id)}/conda-environment`, { prefix }, requestKey());
+      this.patch({ sessions: this.state.sessions.map((s) => s.id === id ? updated : s) });
+      return true;
+    } catch (error) {
+      this.fail(error);
+      await this.refreshSessions().catch(this.fail);
+      return false;
+    } finally {
+      this.patch({ settingsBusy: false });
+    }
+  }
   async updateSessionSettings(id: string, settings: Record<string, unknown>) {
     const session = this.state.sessions.find((s) => s.id === id);
     if (this.state.settingsBusy || this.state.submitting || this.state.creating)
@@ -674,16 +691,13 @@ export class ConsoleStore {
       (s) => s.id === id,
     );
     const settings = session?.settings;
-    const live = session?.active_turn_id ? session.turn_settings : undefined;
     const fallback = id ? this.defaults : this.state.preferences;
     return {
       model:
-        live?.model ||
         settings?.collaborationMode?.settings?.model ||
         settings?.model ||
         fallback.model,
       effort:
-        live?.effort ||
         settings?.collaborationMode?.settings?.reasoning_effort ||
         settings?.effort ||
         settings?.config?.model_reasoning_effort ||
@@ -700,15 +714,9 @@ export class ConsoleStore {
       this.patch({ preferences: next, ...(update.mode === "plan" ? { goalInputs: { ...this.state.goalInputs, new: false } } : {}) });
       return true;
     }
-    if (session.active_turn_id) {
-      if (update.mode !== undefined) {
-        this.fail(new Error("工作模式将在当前回复结束后才能切换"));
-        return false;
-      }
-      return this.updateTurnSettings(session.id, {
-        ...(update.model !== undefined ? { model: update.model } : {}),
-        ...(update.effort !== undefined ? { effort: update.effort } : {}),
-      });
+    if (session.active_turn_id && update.mode !== undefined) {
+      this.fail(new Error("工作模式将在当前回复结束后才能切换"));
+      return false;
     }
     this.patch({ settingsBusy: true });
     try {
@@ -779,9 +787,17 @@ export class ConsoleStore {
       this.fail(error); return false;
     } finally { this.patch({ submitting: false }); }
   }
+  get turnModelSwitchingEnabled() {
+    return this.state.runtimeDefaults.features?.step_model_switching === true;
+  }
   async updateTurnSettings(id: string, settings: Record<string, unknown>) {
     const session = this.state.sessions.find((s) => s.id === id);
     if (!session?.thread_id || !session.active_turn_id || this.state.settingsBusy) return false;
+    const changesModel = ["model", "effort", "summary", "serviceTier"].some((key) => key in settings);
+    if (changesModel && !this.turnModelSwitchingEnabled) {
+      this.fail(new Error("请先在“配置”中启用“回复中切换模型与推理强度”，并新建聊天；也可选择“用于后续回复”，下次发送消息生效。"));
+      return false;
+    }
     const turnId = session.active_turn_id;
     this.patch({ settingsBusy: true, error: "" });
     try {
@@ -789,8 +805,12 @@ export class ConsoleStore {
       this.patch({ sessions: this.state.sessions.map((s) => s.id === id && s.active_turn_id === turnId
         ? { ...s, turn_settings: { ...s.turn_settings, ...settings } } : s) });
       return true;
-    } catch (error) { this.fail(error); return false; }
-    finally { this.patch({ settingsBusy: false }); }
+    } catch (error) {
+      this.fail(error instanceof Error && error.message.includes("step_model_switching")
+        ? new Error("当前聊天尚未启用回复中切换。请在启用配置后新建聊天，或选择“用于后续回复”，下次发送消息生效。")
+        : error);
+      return false;
+    } finally { this.patch({ settingsBusy: false }); }
   }
   private turnOptions(
     settings = this.composerSettings,

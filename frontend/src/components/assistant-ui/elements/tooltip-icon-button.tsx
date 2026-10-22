@@ -24,7 +24,7 @@ export const TooltipIconButton = forwardRef<
 >(({ children, tooltip, side = "bottom", className, ...rest }, ref) => {
   return (
     <TooltipProvider delayDuration={0}>
-      <Tooltip>
+      <Tooltip disableHoverableContent>
         <TooltipTrigger asChild>
           <Button
             variant="ghost"
@@ -40,7 +40,7 @@ export const TooltipIconButton = forwardRef<
             <span className="aui-sr-only sr-only">{tooltip}</span>
           </Button>
         </TooltipTrigger>
-        <TooltipContent side={side}>{tooltip}</TooltipContent>
+        <TooltipContent side={side} className="pointer-events-none">{tooltip}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
   );
