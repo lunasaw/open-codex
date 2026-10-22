@@ -6,8 +6,9 @@ export async function native<T = Obj>(
   method: string,
   params: Obj | null = {},
   key = requestKey(),
+  sessionId?: string,
 ): Promise<T> {
-  return api<T>("/api/native/call", { method, params }, key);
+  return api<T>("/api/native/call", { method, params, ...(sessionId ? { session_id: sessionId } : {}) }, key);
 }
 export const sandboxPolicy = (value: string) =>
   value === "workspace-write"

@@ -6,6 +6,7 @@ import json
 import threading
 import time
 import uuid
+import copy
 
 from .registry import ToolContext, ToolRegistry
 from jsonschema import Draft202012Validator
@@ -13,6 +14,9 @@ from .state import AtomicJsonStore, identifier, payload_digest, single_writer_lo
 from .console.observer import observation_context
 from .native import NativeBridge, PROTOCOL
 from .mcp_app_context import with_app_context
+from .conda import activate_environment, runtime_overrides
+
+_UNCHANGED = object()
 
 
 class HostNotReady(RuntimeError):
@@ -42,6 +46,7 @@ class AgentHost:
                          'principal_digest': payload_digest([principal_id, sorted(actions)])}
         self.client, self.ready = None, False
         self._sessions, self._attached, self._cancels = {}, set(), {}
+        self._conda_environments: dict[str, dict[str, str | None]] = {}
         self._admission = asyncio.Lock()
         self._active_turns = 0
         self._reconciler_last_success = 0.0
@@ -453,7 +458,18 @@ class AgentHost:
         self.events.append(session_id, {'kind': 'turn', 'public': {'status': 'pending', 'action': 'interrupt'}})
         return {'status': 'pending' if session.get('active_turn_id') else session['status']}
 
-    async def resume(self, session_id, *, options=None):
+    def command_environment(self, session_id: str) -> dict[str, str | None]:
+        session = self._session(session_id)
+        if not session or session['status'] not in {'ready', 'running'} or session_id not in self._attached:
+            raise ValueError('请先恢复会话，再启动终端')
+        if session.get('conda_environment') and session_id not in self._conda_environments:
+            raise HostNotReady('Conda environment requires resume')
+        return dict(self._conda_environments.get(session_id, {}))
+
+    async def set_conda_environment(self, session_id: str, prefix: str | None):
+        return await self.resume(session_id, conda_prefix=prefix)
+
+    async def resume(self, session_id, *, options=None, conda_prefix=_UNCHANGED):
         try:
             self.assert_ready()
         except HostNotReady as exc:
@@ -474,6 +490,9 @@ class AgentHost:
                 raise ResumeRejected('session binding mismatch', code=code)
             if session['id'] in self._attached and session.get('active_turn_id'):
                 raise ResumeRejected('turn still active', code='session-turn-active')
+            if conda_prefix is not _UNCHANGED and (session.get('active_turn_id') or session.get('active_request_id')
+                    or session['status'] in {'starting', 'running', 'interrupting', 'closing'}):
+                raise ValueError('请在当前回复结束后切换 Conda 环境')
             for path in (self.store.root / 'tool-calls').glob('*.json'):
                 call = self.store.read(str(path.relative_to(self.store.root)))
                 if call['identity']['session_id'] == session_id and call['state'] != 'receipt_saved':
@@ -502,7 +521,38 @@ class AgentHost:
                 record = self.store.read(path)
                 record.update(turn_id=turn['id'], status=turn['status'])
                 self.store.write(path, record)
+            reload_environment = (conda_prefix is not _UNCHANGED or bool(session.get('conda_environment'))
+                                  or session.get('environment_reload_required', False))
+            saved_settings = copy.deepcopy(session.get('settings', {}))
+            if reload_environment:
+                prefix = (session.get('conda_environment') or {}).get('prefix') if conda_prefix is _UNCHANGED else conda_prefix
+                environment, variables = await asyncio.to_thread(activate_environment, prefix)
+                resume_schema = PROTOCOL.schema('thread/resume')
+                resume_fields = resume_schema['definitions']['ThreadResumeParams']['properties']
+                options = {**{k: v for k, v in saved_settings.items() if k in resume_fields}, **(options or {})}
+                config = dict(options.get('config') or {})
+                if environment:
+                    native_config = await self.client.peer.request('config/read', {'includeLayers': False, 'cwd': session.get('cwd')})
+                    excludes = (native_config.get('config', {}).get('shell_environment_policy') or {}).get('exclude') or []
+                    config = runtime_overrides(config, variables, excludes=excludes)
+                options['config'] = config
+                # Native resume only reloads an idle thread with overrides after
+                # this connection unsubscribes. Persist intent before detaching.
+                session.update(status='recovery_required', conda_environment=environment, environment_reload_required=True)
+                self._save(session)
+                self._attached.discard(session_id)
+                self._conda_environments.pop(session_id, None)
+                await self.client.peer.request('thread/unsubscribe', {'threadId': session['thread_id']})
             await self.client.resume(session['thread_id'], **({'options': options} if options else {}))
+            if reload_environment:
+                fields = PROTOCOL.schema('thread/settings/update')['definitions']['ThreadSettingsUpdateParams']['properties']
+                settings = {k: v for k, v in saved_settings.items() if k in fields and k != 'threadId'}
+                if settings.get('permissions'):
+                    settings.pop('sandboxPolicy', None)
+                if settings:
+                    await self.client.peer.request('thread/settings/update', {'threadId': session['thread_id'], **settings})
+                self._conda_environments[session_id] = variables
+                session.pop('environment_reload_required', None)
             if self.configuration_changed:
                 await self.configuration_changed()
                 session.update(self.bindings)

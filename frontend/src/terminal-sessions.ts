@@ -1,4 +1,4 @@
-import { api, requestKey } from "./store";
+import { api, requestKey, consoleStore as store } from "./store";
 import { native, encode64, type Obj } from "./native";
 
 export type TerminalKind = "command" | "process";
@@ -8,6 +8,7 @@ export type TerminalSession = {
   chunks: Uint8Array[]; exitCode?: number; error: string;
   cursor: string; baseline: string; size: { cols: number; rows: number }; capReached: boolean;
   options?: Obj; advancedRequest?: boolean; tty?: boolean;
+  sessionId?: string; environmentName?: string;
 };
 const storageKey = "codex-agent.terminal-handles";
 const listeners = new Set<() => void>();
@@ -87,13 +88,13 @@ function connect(row: TerminalSession, spawn: boolean) {
     if (spawn) row.status = "running";
     // Replaying this exact request after a browser reload only retrieves the
     // Host's durable receipt. It cannot launch the command twice.
-    void native("command/exec", { ...paramsFor(row), processId: row.id }, row.id).then(async (result) => {
+    void native("command/exec", { ...paramsFor(row), processId: row.id }, row.id, row.sessionId).then(async (result) => {
       await drain(); await drain(); finish(result);
     }).catch((error) => { row.status = "unknown"; row.error = String(error); persist(); emit(); }).finally(stop);
   } else {
     // Resolve a possibly lost spawn response with the original receipt as well.
     // This also makes a reload during startup recover its running state.
-    void native("process/spawn", { ...paramsFor(row), processHandle: row.id }, row.id).then(() => {
+    void native("process/spawn", { ...paramsFor(row), processHandle: row.id }, row.id, row.sessionId).then(() => {
       if (row.status === "starting") row.status = "running"; persist(); emit();
     }).catch((error) => { stop(); row.status = "unknown"; row.error = String(error); persist(); emit(); });
   }
@@ -122,10 +123,12 @@ export const terminals = {
   },
   async start(kind: TerminalKind, cwd: string, command: string[], options?: Obj) {
     if (!cwd.trim() || !command[0]?.trim()) throw new Error("请输入工作目录和可执行程序");
+    const session = store.state.sessions.find((s) => s.id === store.state.active);
     const baseline = await api<Obj>("/api/events/history?limit=1");
     const row: TerminalSession = { id: requestKey(), kind, cwd, command, status: "starting", chunks: [], error: "",
       cursor: baseline.watermark, baseline: baseline.watermark, size: { cols: 100, rows: 24 }, capReached: false,
-      options, tty: options?.tty !== false, advancedRequest: !!options && Object.keys(options).length > 0 };
+      options, tty: options?.tty !== false, advancedRequest: !!options && Object.keys(options).length > 0,
+      sessionId: session?.id, environmentName: session?.conda_environment?.name };
     sessions = [...sessions, row]; connect(row, true); return row.id;
   },
   async input(row: TerminalSession, data: string) {

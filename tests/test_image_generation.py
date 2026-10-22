@@ -1,9 +1,15 @@
 import json
 import os
+import base64
+import shutil
+from email.parser import BytesParser
+from email.policy import default
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -12,7 +18,7 @@ from test_console import FakeHost, call, payload
 from codex_agent.config import AgentConfig
 from codex_agent.console.server import ConsoleApp
 from codex_agent.events import EventLog
-from codex_agent.image_generation import DEFAULTS, ImageGenerationSettings, api_base, private_write
+from codex_agent.image_generation import DEFAULTS, ImageGenerationSettings, api_base, private_write, request_headers
 
 
 class ImageSettingsTests(unittest.TestCase):
@@ -25,8 +31,28 @@ class ImageSettingsTests(unittest.TestCase):
         self.config = SimpleNamespace(state_dir=self.root / 'state', codex_home=self.root / 'home',
                                       raw={'codex': {'model_api_key_file': str(self.key)}})
         self.settings = ImageGenerationSettings(self.config, editable=True)
+        # Keep mutable test fixtures away from the immutable project skill bundle.
+        self.settings.script = self.root / 'source-skill/scripts/_image_gen_original.py'
         self.settings.script.parent.mkdir(parents=True)
-        self.settings.script.write_text('import os,sys\nprint(os.environ["OPENAI_API_KEY"])\nprint(sys.argv[1:])\n')
+        self.settings.script.write_text('''import os, sys
+def _create_client(): pass
+def _create_async_client(): pass
+def main():
+    print(os.environ['OPENAI_API_KEY'])
+    print(sys.argv[1:])
+    return 0
+if __name__ == '__main__': raise SystemExit(main())
+''')
+        self.source = self.settings.script.parent.parent
+        private_write(self.source / 'SKILL.md', '---\nname: "imagegen-api"\ndescription: "Generate images."\n---\n\n'
+                      '<!-- codex-agent:image-generation-settings -->\n'
+                      '# Complete workflow\nCollect input roles, preserve constraints, inspect and iterate.\n')
+        shutil.copyfile(Path(__file__).parents[1] / 'src/codex_agent/skills/imagegen-api/scripts/image_gen.py',
+                        self.source / 'scripts/image_gen.py')
+        private_write(self.source / 'references/prompting.md', 'Keep user constraints.\n')
+        private_write(self.source / 'assets/icon.png', b'\x89PNG\r\n\x1a\n')
+        private_write(self.source / 'agents/openai.yaml', 'interface:\n  display_name: "Image Gen API"\n'
+                      '  default_prompt: "Use $imagegen-api."\npolicy:\n  allow_implicit_invocation: false\n')
         self.native = {'model_provider': 'openai', 'openai_base_url': 'https://gateway.example/v1'}
 
     def body(self, **changes):
@@ -57,6 +83,39 @@ class ImageSettingsTests(unittest.TestCase):
                                  '--prompt', 'fixture', '--out', 'fixture.png'], text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_complete_skill_and_resources_preserved_with_configured_entrypoint(self):
+        original = {path.relative_to(self.source): path.read_bytes()
+                    for path in self.source.rglob('*') if path.is_file()}
+        self.settings.save(self.body(enabled=True), self.native)
+        target = self.settings.skill.parent
+        body = (self.source / 'SKILL.md').read_text().split('\n---\n', 1)[1].lstrip('\n')
+        self.assertTrue(self.settings.skill.read_text().endswith(body))
+        self.assertEqual(self.settings.api_script.read_bytes(), original[Path('scripts/_image_gen_original.py')])
+        self.assertEqual((target / 'scripts/image_gen.py').read_bytes(), original[Path('scripts/image_gen.py')])
+        binding = json.loads((target / 'scripts/_host_binding.json').read_text())
+        self.assertEqual(binding['cli'], str(Path(__file__).parents[1] / 'src/codex_agent/image_generation_cli.py'))
+        self.assertEqual(binding['profile'], str(self.settings.runtime_path))
+        for name in ('references/prompting.md', 'assets/icon.png'):
+            self.assertEqual((target / name).read_bytes(), original[Path(name)])
+        metadata = (target / 'agents/openai.yaml').read_text()
+        self.assertIn('Use $imagegen-api.', metadata)
+        self.assertIn('allow_implicit_invocation: false', metadata)
+        self.assertEqual(original, {path.relative_to(self.source): path.read_bytes()
+                                   for path in self.source.rglob('*') if path.is_file()})
+        # The copied public entrypoint accepts original CLI commands and flags.
+        command = [sys.executable, str(target / 'scripts/image_gen.py'), 'generate-batch',
+                   '--input', 'jobs.jsonl', '--out-dir', 'images', '--concurrency', '2', '--dry-run']
+        result = subprocess.run(command, cwd=self.root, env={'PATH': '/usr/bin:/bin'},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('generate-batch', result.stdout)
+        self.assertIn('jobs.jsonl', result.stdout)
+        self.assertNotIn('fixture-secret', result.stdout + result.stderr)
+        private_write(self.source / 'references/prompting.md', 'Updated upstream guidance.\n')
+        self.settings.initialize(self.native)
+        self.assertEqual((target / 'references/prompting.md').read_bytes(),
+                         (self.source / 'references/prompting.md').read_bytes())
+
     def test_custom_key_preserved_only_for_same_endpoint(self):
         self.settings.save(self.body(connection='custom', baseUrl='https://images.example/v1', apiKey='custom-secret'), self.native)
         self.assertTrue(self.settings.public(self.native)['keyConfigured'])
@@ -66,6 +125,124 @@ class ImageSettingsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.settings.save(self.body(baseUrl='https://different.example/v1'), self.native)
 
+    def test_header_defaults_web_override_model_changes_and_validation(self):
+        headers = {'x-higress-llm-model': '{model}', 'X-Gateway-Option': 'fixed'}
+        self.settings = ImageGenerationSettings(self.file_config(headers=headers), editable=True)
+        self.settings.initialize(self.native)
+        self.assertEqual(self.settings.public(self.native)['headers'], headers)
+        self.assertEqual(json.loads(self.settings.runtime_path.read_text())['headers'], headers)
+        self.settings.save(self.body(model='gpt-image-2.5-flare'), self.native)
+        self.assertEqual(request_headers(self.settings.read())['x-higress-llm-model'], 'gpt-image-2.5-flare')
+        self.settings.save(self.body(model='gpt-image-2.5-sunburst'), self.native)
+        self.assertEqual(request_headers(self.settings.read())['x-higress-llm-model'], 'gpt-image-2.5-sunburst')
+        for invalid in ([], None, {'bad name': 'x'}, {'X-Route': 'a\r\nb'}, {'X-Route': 1},
+                        {'Authorization': 'secret'}, {'Content-Type': 'application/json'},
+                        {'Host': 'other.example'}, {'Connection': 'close'}, {'X-Route': 'x', 'x-route': 'y'},
+                        {'X-Route': '图像'}, {'X-Route': 'a' * 4097},
+                        {f'X-{i}': 'x' for i in range(33)}, {f'X-{i}': 'x' * 4096 for i in range(5)}):
+            with self.subTest(headers=invalid), self.assertRaises(ValueError):
+                self.settings.prepare(self.body(headers=invalid), self.native)
+            with self.subTest(file_headers=invalid), self.assertRaises(ValueError):
+                self.file_config(headers=invalid)
+        self.settings.save(self.body(headers={}), self.native)
+        self.assertEqual(request_headers(self.settings.read()), {})
+
+    def test_connection_probes_receive_resolved_headers(self):
+        headers = {'x-higress-llm-model': '{model}'}
+        with patch('codex_agent.image_generation.request_json', side_effect=[(404, {}), (400, {})]) as request:
+            self.settings.check(self.body(model='gpt-image-2.5-flare', headers=headers), self.native)
+        for args in request.call_args_list:
+            self.assertEqual(args.kwargs['headers'], {'x-higress-llm-model': 'gpt-image-2.5-flare'})
+
+    def test_headers_reach_json_and_multipart_sdk_requests_without_leaking(self):
+        requests = []
+
+        class Gateway(BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append((self.path, self.headers, b''))
+                self.respond({'data': []})
+
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers['Content-Length']))
+                requests.append((self.path, self.headers, raw))
+                self.respond({'data': []})
+
+            def respond(self, body):
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Gateway)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+        base = f'http://127.0.0.1:{server.server_port}/v1'
+        self.settings.script.write_text('''import argparse, asyncio, os, sys
+from openai import OpenAI, AsyncOpenAI
+def _create_client(): return OpenAI()
+def _create_async_client(): return AsyncOpenAI()
+async def perform():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('command')
+    parser.add_argument('--model')
+    parser.add_argument('--image')
+    args, _ = parser.parse_known_args()
+    client = _create_async_client() if os.environ.get('FIXTURE_ASYNC') else _create_client()
+    if args.command == 'edit':
+        with open(args.image, 'rb') as image:
+            result = client.images.edit(model=args.model, prompt='edit', image=image)
+            if os.environ.get('FIXTURE_ASYNC'): await result
+    else:
+        result = client.images.generate(model=args.model, prompt='generate')
+        if os.environ.get('FIXTURE_ASYNC'): await result
+    if os.environ.get('FIXTURE_ASYNC'): await client.close()
+    else: client.close()
+    print('header-private-value ' + os.environ['OPENAI_API_KEY'])
+def main():
+    asyncio.run(perform())
+    return 0
+if __name__ == '__main__': raise SystemExit(main())
+''')
+        headers = {'x-higress-llm-model': '{model}', 'X-Option': 'header-private-value'}
+        self.settings.save(self.body(enabled=True, connection='custom', baseUrl=base,
+                                     apiKey='custom-secret', headers=headers, model='gpt-image-2.5-flare'), self.native)
+        self.settings.check(self.body(), self.native)
+        image = self.root / 'input.png'
+        image.write_bytes(b'fixture-image-bytes')
+        runner = Path(__file__).parents[1] / 'src/codex_agent/image_generation_cli.py'
+        for asynchronous in (False, True):
+            for editing in (False, True):
+                command = [sys.executable, str(runner), '--profile', str(self.settings.runtime_path),
+                           '--prompt', 'fixture', '--out', str(self.root / 'out.png')]
+                if editing:
+                    command.extend(['--image', str(image)])
+                result = subprocess.run(command, capture_output=True, text=True, timeout=30,
+                                        env={**os.environ, 'FIXTURE_ASYNC': '1' if asynchronous else ''})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn('custom-secret', result.stdout + result.stderr)
+                self.assertNotIn('header-private-value', result.stdout + result.stderr)
+        self.assertEqual(len(requests), 6)
+        for path, wire_headers, raw in requests:
+            self.assertEqual(wire_headers['x-higress-llm-model'], 'gpt-image-2.5-flare')
+            self.assertEqual(wire_headers['Authorization'], 'Bearer custom-secret')
+            self.assertEqual(wire_headers['X-Option'], 'header-private-value')
+            if path.endswith('/edits'):
+                self.assertIn('multipart/form-data; boundary=', wire_headers['Content-Type'])
+                message = BytesParser(policy=default).parsebytes(
+                    ('Content-Type: ' + wire_headers['Content-Type'] + '\r\n\r\n').encode() + raw)
+                parts = {part.get_param('name', header='content-disposition'): part.get_payload(decode=True)
+                         for part in message.iter_parts()}
+                self.assertEqual(parts['model'], b'gpt-image-2.5-flare')
+                self.assertIn(b'fixture-image-bytes', parts.values())
+            elif raw:
+                self.assertEqual(json.loads(raw)['model'], 'gpt-image-2.5-flare')
+
     def file_config(self, **changes):
         return AgentConfig.from_dict({
             'schema_version': 'codex-agent/v2',
@@ -74,6 +251,87 @@ class ImageSettingsTests(unittest.TestCase):
             'image_generation': {'enabled': True, 'connection': 'custom', 'base_url': 'http://images.example/v1/',
                                  'api_key_file': 'chat-key', **changes},
         }, self.root)
+
+    def test_original_cli_generation_edit_and_batch_through_configured_gateway(self):
+        bundle = Path(__file__).parents[1] / 'src/codex_agent/skills/imagegen-api'
+        shutil.copytree(bundle, self.source, dirs_exist_ok=True)
+        self.settings.script = self.source / 'scripts/_image_gen_original.py'
+        requests = []
+        encoded = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
+
+        class Gateway(BaseHTTPRequestHandler):
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers['Content-Length']))
+                if self.path.endswith('/edits'):
+                    message = BytesParser(policy=default).parsebytes(
+                        ('Content-Type: ' + self.headers['Content-Type'] + '\r\n\r\n').encode() + raw)
+                    parts = list(message.iter_parts())
+                    fields = {p.get_param('name', header='content-disposition'): p.get_payload(decode=True)
+                              for p in parts}
+                    body = {k: v.decode() for k, v in fields.items() if k not in {'image[]', 'mask'}}
+                    body['files'] = [p.get_payload(decode=True) for p in parts if p.get_filename()]
+                else:
+                    body = json.loads(raw)
+                requests.append((self.path, self.headers, body))
+                data = {'data': [{'b64_json': encoded} for _ in range(int(body.get('n', 1)))]}
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(data).encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Gateway)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+        self.settings.save(self.body(enabled=True, connection='custom',
+                                     baseUrl=f'http://127.0.0.1:{server.server_port}/v1',
+                                     apiKey='fixture-secret', headers={'X-Route': '{model}'}), self.native)
+        entry = self.settings.skill.parent / 'scripts/image_gen.py'
+
+        def invoke(*arguments, success=True):
+            result = subprocess.run([sys.executable, str(entry), *arguments], cwd=self.root,
+                                    text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode == 0, success, result.stderr)
+            self.assertNotIn('fixture-secret', result.stdout + result.stderr)
+            return result
+
+        prompt = self.root / 'prompt.txt'
+        prompt.write_text('A white cat.\n')
+        invoke('generate', '--prompt-file', str(prompt), '--out', 'preview.png', '--dry-run')
+        self.assertFalse(requests)
+        invoke('generate', '--prompt-file', str(prompt), '--n', '2', '--out', 'variant.png',
+               '--quality', 'high', '--size', '2048x1152', '--constraints', 'No text.')
+        outputs = list(self.root.glob('variant*.png'))
+        self.assertEqual(len(outputs), 2)
+        self.assertTrue(all(p.read_bytes() == base64.b64decode(encoded) for p in outputs))
+        self.assertEqual(requests[-1][2]['quality'], 'high')
+        self.assertEqual(requests[-1][2]['size'], '2048x1152')
+        self.assertIn('No text.', requests[-1][2]['prompt'])
+        invoke('edit', '--image', str(outputs[0]), '--image', str(outputs[1]), '--mask', str(outputs[0]),
+               '--prompt', 'Change only the background; preserve the cat.', '--out', 'edited.png')
+        self.assertEqual(len(requests[-1][2]['files']), 3)
+        self.assertEqual((self.root / 'edited.png').read_bytes(), base64.b64decode(encoded))
+        jobs = self.root / 'jobs.jsonl'
+        jobs.write_text(json.dumps({'prompt': 'Cat', 'out': 'cat.png'}) + '\n' +
+                        json.dumps({'prompt': 'Dog', 'model': 'gpt-image-1.5', 'out': 'dog.png'}) + '\n')
+        invoke('generate-batch', '--input', str(jobs), '--out-dir', 'batch', '--concurrency', '2')
+        self.assertEqual(len(list((self.root / 'batch').glob('*.png'))), 2)
+        self.assertEqual({body['model'] for _, _, body in requests[-2:]}, {'gpt-image-2', 'gpt-image-1.5'})
+        for _, headers, body in requests:
+            self.assertEqual(headers['X-Route'], body['model'])
+            self.assertEqual(headers['Authorization'], 'Bearer fixture-secret')
+        # Preserve upstream protection for existing assets and model limitations.
+        (self.root / 'protected.png').write_bytes(b'existing user asset')
+        invoke('generate', '--prompt', 'Cat', '--out', 'protected.png', success=False)
+        self.assertEqual((self.root / 'protected.png').read_bytes(), b'existing user asset')
+        count = len(requests)
+        invoke('generate', '--prompt', 'Cat', '--background', 'transparent', success=False)
+        self.assertEqual(len(requests), count)
 
     def test_file_defaults_activate_on_startup_and_preserve_web_overrides(self):
         config = self.file_config(quality='high')
@@ -227,7 +485,6 @@ class ImageSettingsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                                      'api_key_file': 'image-key'},
             }, root)
             settings = ImageGenerationSettings(config)
-            private_write(settings.script, '# fixture; generation is never invoked\n')
             host, app = build_host(config, development=True)
             try:
                 await host.start()

@@ -17,6 +17,7 @@ export CONSOLE_TEST_URL=http://127.0.0.1:18881
 npm run test:browser
 node ../tests/test_native_browser.cjs
 node ../tests/test_settings_browser.cjs
+node ../tests/test_reasoning_settings_browser.cjs
 node ../tests/test_native_completion_browser.cjs
 node ../tests/test_subagents_browser.cjs
 node --test src/markdown-math.browser.cjs
@@ -24,8 +25,10 @@ node ../tests/test_chat_interaction.cjs
 node ../tests/test_activity_scroll_browser.cjs
 node ../tests/test_conversation_parity.cjs
 node ../tests/test_workbench_browser.cjs
+node ../tests/test_conda_environment_browser.cjs
 node ../tests/test_sidebar_resize_browser.cjs
 node ../tests/test_copy_reply_browser.cjs
+node ../tests/test_message_markdown_browser.cjs
 node ../tests/test_thread_export_browser.cjs
 node ../tests/test_progressive_loading_browser.cjs
 node ../tests/test_connection_recovery_browser.cjs
@@ -54,6 +57,12 @@ node ../tests/test_apps_launch_browser.cjs
 
 `test_settings_browser.cjs` 验证默认配置的分层读取、用户层版本化保存、重置、冲突保留草稿、
 项目覆盖与只读发布、高级字段和隐藏字段保留、文件预览、刷新及手机/深色布局。
+`test_reasoning_settings_browser.cjs` 验证回复进行中切换输入框的模型与推理强度，
+使用 `thread/settings/update` 保存并在下次发送生效，刷新后保留；设置页同步工作模式中的推理档位。
+“只改当前回复”使用 `turn/settings/update`，需先在“配置 → 模型与运行设置”启用
+“回复中切换模型与推理强度”并新建聊天；已有聊天不会因配置保存或重载立即获得该能力。
+用例同时检查开关的版本化配置保存、旧聊天拒绝时的说明、当前回复与后续设置隔离，以及手机和深色布局。
+
 `configuration-data.test.ts` 和 `store.test.ts` 验证最小配置补丁、推理档位显示、
 项目默认值继承、显式会话覆盖和读取竞争；`test_host_core.py` 验证原生有效设置的持久化。
 
@@ -133,6 +142,8 @@ MCP Apps 验收覆盖消息/上下文桥、工具可见性和作用域、确认/
 
 `test_workbench_browser.cjs` 覆盖任务面板开关、草稿保留、Diff 轮次隔离、计划、目录浏览、
 文件预览、底部命令执行与面板状态保留，以及深色和手机布局。
+`test_conda_environment_browser.cjs` 覆盖右侧环境绑定与解除、会话刷新恢复、终端命令环境注入、
+会话隔离和回复进行时禁用切换。
 设置 `CONSOLE_SCREENSHOTS=/absolute/output/path` 可保存浏览器验收截图。
 
 `test_composer_queue_browser.cjs` 验证输入框上方的队列条、Enter/Tab 分流、输入法保护、
@@ -144,6 +155,11 @@ MCP Apps 验收覆盖消息/上下文桥、工具可见性和作用域、确认/
 
 `test_copy_reply_browser.cjs` 逐字比对长回答（包括最后一行和 Markdown），并验证流式完成、
 刷新恢复、剪贴板 API 缺失或拒绝时的兼容复制、失败提示和重试。
+
+`test_message_markdown_browser.cjs` 验证从气泡移动到复制按钮、靠近按钮周围时持续显示，
+提示不拦截鼠标，键盘聚焦和触屏复制，发送中与刷新后的 Markdown 原文一致，
+不支持分支切换时隐藏编号；通过真实剪贴板验证纯文本和网页富文本粘贴、
+代码缩进、嵌套列表、表格、选区替换、撤销/重做、附件粘贴、Markdown 预览，以及深色和手机布局。
 
 Python 回归覆盖配置拒绝、无扩展 Host、可配置 namespace、Provider 加载与清理、参数/操作 allowlist、回执去重、未知操作恢复、进程恢复、权限请求及 Console SQLite/SSE。
 

@@ -72,9 +72,9 @@ export function ConfigurationSettings({ state }: { state: ConsoleState }) {
     </select>);
   };
   const text = (key: string, label: string, description = "", list?: string) => row(key, label, <input aria-label={label} list={list} value={isRedacted(read(key)) ? "" : read(key) ?? ""} placeholder={isRedacted(read(key)) ? "已配置；输入新值以替换" : "继承默认"} onChange={(e) => set(key, e.target.value || null)} />, description);
-  const toggle = (key: string, label: string) => row(key, label, <select aria-label={label} value={read(key) == null ? "" : String(read(key))} onChange={(e) => set(key, e.target.value === "" ? null : e.target.value === "true")}>
+  const toggle = (key: string, label: string, description = "") => row(key, label, <select aria-label={label} value={read(key) == null ? "" : String(read(key))} onChange={(e) => set(key, e.target.value === "" ? null : e.target.value === "true")}>
     <option value="">继承默认</option><option value="true">启用</option><option value="false">停用</option>
-  </select>);
+  </select>, description);
   const lines = (key: string, label: string) => row(key, label, <textarea aria-label={label} rows={3} value={Array.isArray(read(key)) ? read(key).join("\n") : ""} placeholder="每行一项，留空继承默认" onChange={(e) => set(key, e.target.value.trim() ? e.target.value.split("\n") : null)} />);
   const efforts = [...new Set(state.models.flatMap((m) => m.supportedReasoningEfforts?.map((e) => e.reasoningEffort) || []))];
   const model = state.models.find((m) => m.model === (read("model") || effective.model));
@@ -90,10 +90,11 @@ export function ConfigurationSettings({ state }: { state: ConsoleState }) {
     for (const key of numbers) if (key in normalized) normalized[key] = positiveInteger(String(normalized[key] ?? ""));
     const edits = configEdits(normalized, own);
     if (!edits.length) { setDraft({}); return; }
-    const result = await native("config/batchWrite", configWriteParams(layer!, edits, reload));
+    const reloadForWrite = reload || edits.some((edit) => edit.keyPath === "features.step_model_switching");
+    const result = await native("config/batchWrite", configWriteParams(layer!, edits, reloadForWrite));
     // The write succeeded even if the subsequent read fails; never replay it.
     setDraft({});
-    setNotice(result.status === "okOverridden" || result.overriddenMetadata ? "已保存；部分值被更高优先级配置覆盖，请查看当前生效值。" : reload ? "默认配置已保存，并已请求原生重载。会话设置不会因此全部切换。" : "默认配置已保存，用于新聊天。");
+    setNotice(result.status === "okOverridden" || result.overriddenMetadata ? "已保存；部分值被更高优先级配置覆盖，请查看当前生效值。" : reloadForWrite ? "默认配置已保存，并已请求原生重载。已有聊天的设置不会因此全部切换。" : "默认配置已保存，用于新聊天。");
     await resource.refresh();
     await store.refreshRuntimeDefaults(cwd);
     await store.refreshSessions();
@@ -126,6 +127,7 @@ export function ConfigurationSettings({ state }: { state: ConsoleState }) {
           <datalist id="config-providers">{Object.keys(effective.model_providers || {}).map((id) => <option key={id}>{id}</option>)}</datalist>
           {select("model_reasoning_effort", "默认推理强度", modelEfforts)}
           {select("plan_mode_reasoning_effort", "计划模式推理强度", modelEfforts)}
+          {toggle("features.step_model_switching", "回复中切换模型与推理强度", "启用后新建聊天，可单独调整运行中的回复；已有运行中的聊天不会因保存或重载立即启用。输入框的模型与强度选择始终在下次发送消息时生效。")}
           {text("service_tier", "默认服务等级", "可用等级取决于模型和账号")}
           {!personalityDeprecated && select("personality", "交流风格", ["none", "friendly", "pragmatic"])}
           {select("approvals_reviewer", "审批方式", req?.allowedApprovalsReviewers || ["user", "auto_review"])}

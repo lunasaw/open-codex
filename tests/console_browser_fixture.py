@@ -227,6 +227,8 @@ class FixtureNative(NativeBridge):
             self.host.restore_thread(thread_id)
             return {'thread': {'id': thread_id, 'turns': self.host.turns[thread_id]}}
         if method == 'command/exec':
+            if params.get('command') == ['python', '--version']:
+                return {'stdout': params.get('env', {}).get('CONDA_PREFIX', 'default'), 'stderr': '', 'exitCode': 0}
             if params.get('command', [None])[0] == 'git':
                 output = {
                     'for-each-ref': 'develop\nfeature/review\nmain\n',
@@ -306,6 +308,17 @@ class BrowserHost(test_console.FakeHost):
     async def resume(self, session_id):
         self.sessions[session_id]['status'] = 'ready'
         return self.sessions[session_id]
+
+    async def set_conda_environment(self, session_id, prefix):
+        session = self.sessions[session_id]
+        if session.get('active_turn_id'):
+            raise ValueError('turn active')
+        session['conda_environment'] = {'name': Path(prefix).name, 'prefix': prefix} if prefix else None
+        return session
+
+    def command_environment(self, session_id):
+        environment = self.sessions[session_id].get('conda_environment')
+        return {'CONDA_PREFIX': environment['prefix']} if environment else {}
 
     async def start(self):
         await self.create_session('history')

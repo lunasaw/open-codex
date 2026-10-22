@@ -107,6 +107,8 @@ class AppIntegrations:
 
     async def route(self, method, path, body, headers, query):
         service = self.authenticate(headers)
+        if path == "/internal/v1/app-tool-calls" and method == "POST":
+            return await self.gateway.automatic_call(body, service)
         if path == "/internal/v1/continuation-bindings" and method == "POST":
             return self.background.bind(body, service)
         if path == "/internal/v1/continuations" and method == "POST":

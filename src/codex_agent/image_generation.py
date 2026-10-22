@@ -6,8 +6,6 @@ import importlib.util
 import os
 from pathlib import Path
 import re
-import shlex
-import sys
 import tempfile
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
@@ -16,14 +14,14 @@ from urllib.request import Request, HTTPRedirectHandler, build_opener
 from .state import payload_digest, safe_path
 
 DEFAULTS = {'enabled': False, 'connection': 'current', 'baseUrl': '',
-            'model': 'gpt-image-2', 'quality': 'medium', 'size': '1024x1024'}
+            'model': 'gpt-image-2', 'quality': 'medium', 'size': '1024x1024', 'headers': {}}
 MARKER = '<!-- codex-agent:image-generation-settings -->'
 
 
 def configuration_defaults(raw, path):
     """Parse non-secret deployment defaults; credentials stay in a protected file."""
     names = {'enabled': 'enabled', 'connection': 'connection', 'base_url': 'baseUrl',
-             'model': 'model', 'quality': 'quality', 'size': 'size'}
+             'model': 'model', 'quality': 'quality', 'size': 'size', 'headers': 'headers'}
     if not isinstance(raw, dict) or raw.keys() - {*names, 'api_key_file'}:
         raise ValueError('invalid image_generation fields')
     profile = {**DEFAULTS, **{names[key]: value for key, value in raw.items() if key in names}}
@@ -47,6 +45,30 @@ def validate_options(profile):
     if (not isinstance(profile['quality'], str) or profile['quality'] not in {'low', 'medium', 'high', 'auto'}
             or not isinstance(profile['size'], str) or profile['size'] not in {'auto', '1024x1024', '1536x1024', '1024x1536'}):
         raise ValueError('请选择有效的图片质量和尺寸。')
+    request_headers(profile)
+
+
+def request_headers(profile):
+    """Validate extra gateway headers and resolve the selected image model."""
+    headers = profile.get('headers', {})
+    if not isinstance(headers, dict) or len(headers) > 32:
+        raise ValueError('额外请求头必须是最多 32 项的 JSON 对象。')
+    reserved = {'authorization', 'proxy-authorization', 'cookie', 'host', 'content-type',
+                'content-length', 'connection', 'transfer-encoding', 'te', 'trailer', 'upgrade'}
+    resolved = {}
+    seen = set()
+    for name, value in headers.items():
+        if (not isinstance(name, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}", name)
+                or name.lower() in reserved or name.lower() in seen):
+            raise ValueError('额外请求头名称无效、重复，或覆盖了认证及 HTTP 传输请求头。')
+        if (not isinstance(value, str) or len(value) > 4096
+                or any(ord(char) < 32 or ord(char) > 126 for char in value)):
+            raise ValueError('额外请求头的值必须是不含换行的 ASCII 字符串，且不超过 4096 字符。')
+        seen.add(name.lower())
+        resolved[name] = value.replace('{model}', profile['model'])
+    if sum(len(name) + len(value) for name, value in resolved.items()) > 16384:
+        raise ValueError('额外请求头总长度不能超过 16384 字符。')
+    return resolved
 
 
 def api_base(value):
@@ -66,9 +88,9 @@ def private_write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.' + path.name)
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        with os.fdopen(fd, 'wb') as stream:
             os.fchmod(stream.fileno(), 0o600)
-            stream.write(text)
+            stream.write(text.encode('utf-8') if isinstance(text, str) else text)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -89,9 +111,9 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def request_json(base, key, path, body=None):
+def request_json(base, key, path, body=None, *, headers=None):
     request = Request(base + path, data=None if body is None else json.dumps(body).encode(),
-                      headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
+                      headers={**(headers or {}), 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
     try:
         with build_opener(NoRedirect).open(request, timeout=15) as response:
             data = response.read(2 * 1024 * 1024 + 1)
@@ -129,7 +151,8 @@ class ImageGenerationSettings:
         self.runtime_path = safe_path(config.state_dir, 'console/image-generation-runtime.json')
         self.defaults = getattr(config, 'image_generation', None) or dict(DEFAULTS)
         self.skill = safe_path(config.codex_home, 'skills/imagegen-api/SKILL.md')
-        self.script = safe_path(config.codex_home, 'skills/.system/imagegen/scripts/image_gen.py')
+        self.script = Path(__file__).with_name('skills') / 'imagegen-api/scripts/_image_gen_original.py'
+        self.api_script = self.skill.parent / 'scripts/_image_gen_original.py'
 
     def read(self):
         if not self.path.exists():
@@ -207,7 +230,7 @@ class ImageGenerationSettings:
         if not self.editable:
             raise ValueError('此发布实例的图像设置为只读。')
         profile = self.prepare(body, native_config)
-        profile['script'] = str(self.script)
+        profile['script'] = str(self.api_script)
         self.validate_runtime(profile)
         private_write(self.path, json.dumps(profile, ensure_ascii=False))
         self.activate(profile)
@@ -224,47 +247,36 @@ class ImageGenerationSettings:
         return changed
 
     def validate_runtime(self, profile):
+        validate_options(profile)
         if profile['enabled']:
             api_base(profile['baseUrl'])
             self.credential(profile)
             if not self.script.is_file():
-                raise ValueError('当前实例尚未安装 imagegen 技能的 API 脚本。')
+                raise ValueError('项目安装包缺少 imagegen-api 脚本，请更新项目安装包。')
+            if not (self.script.parent.parent / 'SKILL.md').is_file():
+                raise ValueError('项目安装包缺少完整的 imagegen-api 技能，请更新项目安装包。')
             if importlib.util.find_spec('openai') is None:
                 raise ValueError('服务端缺少绘图依赖，请更新安装本项目依赖后再启用。')
         if self.skill.exists() and MARKER not in self.skill.read_text():
             raise ValueError('已有同名 imagegen-api 技能，请先处理名称冲突。')
 
     def activate(self, profile):
-        # A native shell has a minimal environment, with neither this package
-        # nor its interpreter necessarily on PATH/PYTHONPATH.
-        command = shlex.join([sys.executable, str(Path(__file__).with_name('image_generation_cli.py')),
-                              '--profile', str(self.runtime_path)])
-        text = f'''---
-name: imagegen-api
-description: Generate or edit raster images using the API connection and model explicitly enabled in the Web image settings. Use for drawing, illustrations and image editing; not for code-native charts or diagrams.
----
-{MARKER}
-
-The user enabled API image generation in the instance configuration or Settings → 图像生成. Use this configured API path for image requests; do not require the unavailable built-in image_gen tool or ask the user to select API fallback again. This authorizes the chosen execution path, not unsolicited images.
-
-Run `{command} --help` for supported arguments. Generate with `--prompt "..." --out output/imagegen/name.png`; add repeated `--image path` arguments to edit. The runner loads the saved model, endpoint and credential without printing secrets. Never read or print the profile/key file, or put a key in command arguments. Saving settings does not itself generate images.
-
-Use a new output filename; preserve requested content and style. Return the resulting image with an absolute file path. On permission, unsupported endpoint or quota errors, report the error and stop; do not switch models or providers silently. Native sandbox/network approvals still apply. If settings are disabled, the runner refuses generation.
-'''
+        if profile['enabled']:
+            from .image_generation_skill import install_skill
+            install_skill(self.script.parent.parent, self.skill.parent, self.runtime_path)
         # The runner checks enabled state, so a stale skill can never keep API
         # generation enabled after its profile is disabled.
-        private_write(self.runtime_path, json.dumps({**profile, 'script': str(self.script),
+        private_write(self.runtime_path, json.dumps({**profile, 'script': str(self.api_script),
                                                    'settingsFile': str(self.path)}, ensure_ascii=False))
-        if profile['enabled']:
-            private_write(self.skill, text)
-        elif self.skill.exists():
+        if not profile['enabled'] and self.skill.exists():
             self.skill.unlink()
 
     def check(self, body, native_config):
         profile = self.prepare(body, native_config)
         key = self.credential(profile)
         base = api_base(profile['baseUrl'])
-        status, data = request_json(base, key, '/models')
+        headers = request_headers(profile)
+        status, data = request_json(base, key, '/models', headers=headers)
         # Some image gateways route Images API without exposing a model list.
         # The explicitly entered model remains usable in that case.
         model_list_available = status == 200
@@ -277,7 +289,8 @@ Use a new output filename; preserve requested content and style. Return the resu
                          and isinstance(row.get('id'), str) and row['id'].startswith('gpt-image-')})
         # No prompt: this can expose a gateway permission denial, but can never
         # prove a successful image generation. Do not label validation as ready.
-        status, data = request_json(base, key, '/images/generations', {'model': profile['model'], 'n': 1, 'prompt': ''})
+        status, data = request_json(base, key, '/images/generations',
+                                    {'model': profile['model'], 'n': 1, 'prompt': ''}, headers=headers)
         if status not in {200, 400, 422}:
             return {**response_status(status, data), 'models': models}
         prefix = '模型列表已读取。' if model_list_available else '此网关未提供模型列表，请手动填写绘图模型。'

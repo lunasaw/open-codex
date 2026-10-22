@@ -2,6 +2,7 @@ import { ComposerContextStatus } from "@/context-status";
 import { consoleStore as store } from "@/store";
 import { MessageTurnActions } from "@/thread-actions";
 import { MessageCopyButton } from "@/message-copy";
+import { MarkdownComposerInput } from "@/composer-markdown";
 import { BrandIcon } from "@/brand";
 import { NativeMessageExtras, NativeUserInputs } from "@/native-message-extras";
 import { TurnFileChanges } from "@/turn-file-changes";
@@ -526,7 +527,7 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
           className="flex w-full flex-col rounded-(--composer-radius) border bg-(--composer-bg) p-3 transition-[border-color] data-[dragging=true]:border-dashed"
         >
           <ComposerAttachments />
-          <ComposerPrimitive.Input
+          <MarkdownComposerInput
             {...commands.inputProps}
             addAttachmentOnPaste={!commands.goalMode}
             placeholder={commands.placeholder}
@@ -930,43 +931,43 @@ const UserMessage: FC = () => {
       <div className="aui-user-message-content-wrapper relative min-w-0 max-w-[85%] sm:max-w-[70%]">
         <div className="aui-user-message-content peer rounded-[22px] bg-muted px-4 py-2.5 leading-6 text-foreground [overflow-wrap:anywhere] empty:hidden">
           <MessagePrimitive.Parts
-            components={{ File: UserFilePart, Image: UserImagePart }}
+            components={{ Text: MarkdownText, File: UserFilePart, Image: UserImagePart }}
           />
           <NativeUserInputs />
         </div>
-        {!meta?.sendStatus && <div className="aui-user-action-bar-wrapper absolute right-0 top-full pt-1 peer-empty:hidden">
-          <UserActionBar />
-        </div>}
+      </div>
+
+      <div className="aui-user-message-footer">
+        <BranchPicker data-slot="aui_user-branch-picker" role="group" aria-label="消息分支"
+          title="当前消息版本 / 全部版本" className="m-0 shrink-0" />
+        <UserActionBar pending={!!meta?.sendStatus} />
       </div>
 
       {typeof meta?.sendStatus === "string" && <div role="status" className="text-xs text-muted-foreground">
         {meta.sendStatus === "failed" ? <>发送失败 <button type="button" className="underline" onClick={() => void store.retrySend(sendKey)}>重试发送</button></>
           : meta.sendStatus === "sending" ? "正在发送…" : "已发送"}
       </div>}
-      <BranchPicker
-        data-slot="aui_user-branch-picker"
-        className="col-span-full col-start-1 -me-1 justify-end"
-      />
     </MessagePrimitive.Root>
   );
 };
 
-const UserActionBar: FC = () => {
+const UserActionBar: FC<{ pending: boolean }> = ({ pending }) => {
   return (
     <ActionBarPrimitive.Root
-      hideWhenRunning
-      autohide="always"
-      className="aui-user-action-bar-root flex items-center"
+      autohide="never"
+      className="aui-user-action-bar-root text-muted-foreground flex flex-wrap items-center justify-end gap-0.5"
     >
       <MessageCopyButton label="复制消息" className="size-8 rounded-lg" />
-      <MessageTurnActions />
-      <AuiIf condition={(s) => s.thread.capabilities.edit}>
-        <ActionBarPrimitive.Edit asChild>
-          <TooltipIconButton tooltip="Edit" className="aui-user-action-edit">
-            <PencilIcon />
-          </TooltipIconButton>
-        </ActionBarPrimitive.Edit>
-      </AuiIf>
+      {!pending && <AuiIf condition={(s) => !s.thread.isRunning}>
+        <MessageTurnActions />
+        <AuiIf condition={(s) => s.thread.capabilities.edit}>
+          <ActionBarPrimitive.Edit asChild>
+            <TooltipIconButton tooltip="Edit" className="aui-user-action-edit">
+              <PencilIcon />
+            </TooltipIconButton>
+          </ActionBarPrimitive.Edit>
+        </AuiIf>
+      </AuiIf>}
     </ActionBarPrimitive.Root>
   );
 };
@@ -978,7 +979,7 @@ const EditComposer: FC = () => {
       className="flex flex-col px-2 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
     >
       <ComposerPrimitive.Root className="aui-edit-composer-root border-foreground/10 focus-within:border-foreground/25 ms-auto flex w-full max-w-[85%] cursor-text flex-col rounded-(--composer-radius) border bg-(--composer-bg) transition-[border-color]">
-        <ComposerPrimitive.Input
+        <MarkdownComposerInput
           className="aui-edit-composer-input text-foreground min-h-14 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-base outline-none"
           autoFocus
         />
@@ -1003,6 +1004,8 @@ const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
   className,
   ...rest
 }) => {
+  const canSwitch = useAuiState(s => s.thread.capabilities.switchToBranch);
+  if (!canSwitch) return null;
   return (
     <BranchPickerPrimitive.Root
       hideWhenSingleBranch

@@ -63,6 +63,16 @@ Agent 工具项使用 `mcpAppUi.resourceUri` 创建视图，也兼容旧 `appCon
 | 外链与下载 | HTTP(S) 外链、内嵌资源或所属 MCP 的资源下载，均经用户确认；限制 8 个文件、单文件 8 MiB、总计 16 MiB |
 | 日志 | 最近 50 条、每条最多 4,000 字符，不自动进入模型上下文 |
 
+启用签名调用网关的 App（如 Galatea）按当前会话及回合权限决定是否弹出写操作授权框：
+“请求批准”需确认；“完全访问权限”和“帮我批准”自动确认，仍生成绑定精确参数的签名收据。
+自定义或未知权限组合继续要求确认。切回“请求批准”会撤销尚未派发的自动确认，
+已明确否决的调用不会自动放行。App 服务自身的业务授权和预算检查继续生效。
+
+后台 App 服务可通过 `POST /internal/v1/app-tool-calls` 请求自动确认调用，传入
+`host_session_id`、`server`、`uri`、`name` 和 `arguments`。Bearer 身份必须匹配注册服务器的
+`audience`，Host 自行解析真实会话及权限；“请求批准”返回 `manual_required`，不创建确认。
+自动模式仍经同一签名网关派发并生成持久化收据，可用于后续 continuation 绑定。
+
 模型上下文按 Host session、MCP 服务、资源 URI 和工具调用实例隔离，持久化到 Host 状态目录。
 同一视图只保存最新选择，各实例互不覆盖；每个聊天最多 32 个实例、总计 256 KiB。
 上下文标记为 `untrusted`，不会成为 developer instructions。显式关闭会清除该实例上下文；

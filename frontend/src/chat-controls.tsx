@@ -172,7 +172,7 @@ export function ComposerOptions() {
           <div className="reasoning-ticks" aria-hidden>{efforts.map((effort) => <span key={effort} />)}</div>
           <Slider.Thumb className="reasoning-thumb" aria-label="推理强度" aria-valuetext={effortNames[efforts[index]] || efforts[index]} />
         </Slider.Root> : <p className="reasoning-unavailable">此模型未提供可选推理强度</p>}
-        {session?.active_turn_id && <p className="reasoning-scope">仅应用到当前回复</p>}
+        <p className="reasoning-scope">下次发送消息生效{session?.active_turn_id ? "；当前回复可在模型设置中单独调整" : ""}</p>
       </Popover.Content></Popover.Portal>
     </Popover.Root>
   </div>;

@@ -48,6 +48,21 @@
 .thread-export-status[role="alert"] { color: var(--destructive); }
 .aui-user-message-content { background: #e7f2ff; color: #153456; border-radius: 18px; font-size: 14px; }
 .dark .aui-user-message-content { background: #253c54; color: #e6f1ff; }
+/* Extend hover coverage around the actions without shifting the buttons. */
+.aui-user-message-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 10px; max-width: 100%; min-height: 32px; box-sizing: content-box; padding: 8px; margin: -8px; }
+.aui-user-action-bar-root { opacity: 0; }
+[data-slot="aui_user-message-root"]:hover .aui-user-action-bar-root,
+[data-slot="aui_user-message-root"]:focus-within .aui-user-action-bar-root { opacity: 1; }
+.aui-user-action-bar-root button { width: 28px; height: 28px; border-radius: 7px; }
+.aui-user-message-content .aui-md-p { white-space: pre-wrap; }
+.aui-user-message-content .aui-md { min-width: 0; }
+.composer-markdown { min-width: 0; }
+.composer-markdown-tools { display: flex; justify-content: flex-end; padding: 0 8px 4px; }
+.composer-markdown-tools button { display: inline-flex; align-items: center; gap: 5px; padding: 3px 5px; border-radius: 5px; color: var(--muted-foreground); font-size: 11px; }
+.composer-markdown-tools button:hover { background: var(--muted); color: var(--foreground); }
+.composer-markdown-tools button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.composer-markdown-preview { max-height: min(28dvh, 240px); overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--border); margin: 0 8px 8px; padding: 10px 0 2px; font-size: 14px; overflow-wrap: anywhere; }
+@media (hover: none) { .aui-user-action-bar-root { opacity: 1; } }
 [data-slot="aui_composer-shell"] { border-color: #ededed; border-radius: 23px; box-shadow: 0 2px 8px #00000004; }
 .dark [data-slot="aui_composer-shell"] { border-color: var(--border); }
 .aui-composer-input::placeholder { color: #b0b0b0; }

@@ -18,7 +18,8 @@ function Select({ label, value, set, options, disabled = false }: { label: strin
 }
 export function ModelSettings({ state }: { state: ConsoleState }) {
   const session = state.sessions.find((s) => s.id === state.active); const defaults = state.runtimeDefaults;
-  const [scope, setScope] = useState(session?.active_turn_id ? "turn" : "thread");
+  const [scope, setScope] = useState("thread");
+  const switchingEnabled = store.turnModelSwitchingEnabled;
   useEffect(() => { if (!session?.active_turn_id) setScope("thread"); }, [session?.active_turn_id]);
   const settings = { ...session?.settings, ...(scope === "turn" ? session?.turn_settings : {}) };
   const [model, setModel] = useState(settings.model || store.composerSettings.model);
@@ -63,11 +64,12 @@ export function ModelSettings({ state }: { state: ConsoleState }) {
       return;
     }
     const mode = modes.data?.data?.find((m: Obj) => m.name === preset);
+    const collaboration = mode?.mode ? mode : session?.settings?.collaborationMode;
     const values = { ...common, cwd, ...(!personalityDeprecated ? { personality } : {}),
       ...(profile ? { permissions: profile } : { sandboxPolicy: !sandboxChanged && settings.sandboxPolicy
         ? settings.sandboxPolicy : sandboxPolicy(sandbox) }),
       approvalPolicy: approval === "granular" ? { granular } : approval,
-      ...(mode?.mode ? { collaborationMode: { mode: mode.mode, settings: { model, reasoning_effort: effort, developer_instructions: null } } } : {}),
+      ...(collaboration?.mode ? { collaborationMode: { mode: collaboration.mode, settings: { ...collaboration.settings, model, reasoning_effort: effort, developer_instructions: collaboration.settings?.developer_instructions ?? null } } } : {}),
     };
     let threadId = session?.thread_id;
     if (create || !threadId) {
@@ -80,8 +82,9 @@ export function ModelSettings({ state }: { state: ConsoleState }) {
   return <section className="capability-page model-settings"><h3>模型与权限</h3>
     <p className="muted">{session ? `当前会话 · ${store.title(session.id)}` : "设置新会话的运行方式"}</p>
     {session?.active_turn_id && <div className="terminal-kind-tabs" role="tablist" aria-label="设置作用范围">
-      <button role="tab" aria-selected={scope === "turn"} onClick={() => setScope("turn")}>只改当前回复</button>
+      <button role="tab" aria-selected={scope === "turn"} disabled={!switchingEnabled} onClick={() => setScope("turn")}>只改当前回复</button>
       <button role="tab" aria-selected={scope === "thread"} onClick={() => setScope("thread")}>用于后续回复</button></div>}
+    {session?.active_turn_id && <p className="muted">{live ? "应用后从当前回复的后续模型调用生效。" : "下次发送消息生效。"}{!switchingEnabled && "如需调整当前回复，请先在“配置”中启用“回复中切换模型与推理强度”，再新建聊天。"}</p>}
     <h4>回复</h4><div className="desktop-settings-group">
       <SettingRow label="模型"><input aria-label="模型" list="native-models" value={model} onChange={(e) => setModel(e.target.value)} /><datalist id="native-models">{state.models.map((m) => <option key={m.model} value={m.model}>{m.displayName}</option>)}</datalist></SettingRow>
       <SettingRow label="推理强度" description="ultra 使用运行时提供的主动多 Agent 行为。"><Select label="推理强度" value={effort} set={setEffort} options={store.reasoningEfforts(state.models.find((m) => m.model === model), effort)} /></SettingRow>
@@ -100,7 +103,7 @@ export function ModelSettings({ state }: { state: ConsoleState }) {
         {approval === "granular" && Object.entries({ sandbox_approval: "沙箱越界审批", rules: "命令规则审批", mcp_elicitations: "MCP 交互审批", request_permissions: "额外权限申请", skill_approval: "Skill 审批" }).map(([key, label]) => <SettingRow key={key} label={label}><input type="checkbox" role="switch" aria-label={label} checked={!!granular[key]} onChange={(e) => setGranular({ ...granular, [key]: e.target.checked })} /></SettingRow>)}
       </>}
     </div>
-    <div className="native-options"><Button variant="primary" disabled={action.busy || !model || !cwd} onClick={() => void action.run(() => save(), live ? "已应用到当前回复，后续回复设置保持不变" : "会话设置已应用")}>{live ? "应用到当前回复" : session ? "应用到当前会话" : "创建会话"}</Button>
+    <div className="native-options"><Button variant="primary" disabled={action.busy || state.settingsBusy || !model || !cwd || live && !switchingEnabled} onClick={() => void action.run(() => save(), live ? "已应用到当前回复，后续回复设置保持不变" : "会话设置已保存，下次发送消息生效")}>{live ? "应用到当前回复" : session ? "应用到当前会话" : "创建会话"}</Button>
       {session && <Button variant="outline" disabled={action.busy} onClick={() => void action.run(() => save(true), "已新建会话")}>以此设置新建</Button>}</div>
     <details><summary>组织与运行环境要求</summary>{req ? <Facts value={req} /> : <p>未配置额外要求</p>}</details>
     <Feedback error={action.error || requirements.error || profiles.error || modes.error} status={action.status} />
@@ -129,7 +132,20 @@ export function ModelDefaults({ state }: { state: ConsoleState }) {
       await store.refreshRuntimeDefaults();
     }, "联网搜索配置已保存并请求重新加载")}>保存联网搜索</Button>
     <h4>实验功能</h4><input className="settings-feature-search" aria-label="搜索实验功能" placeholder="搜索功能" value={featureSearch} onChange={(e) => setFeatureSearch(e.target.value)} />
-    <div className="desktop-settings-group">{features.data?.filter((f) => `${f.name} ${f.displayName}`.toLowerCase().includes(featureSearch.toLowerCase())).map((f) => <SettingRow key={f.name} label={f.displayName || f.name} description={f.description || f.stage}><input type="checkbox" role="switch" aria-label={f.displayName || f.name} checked={f.enabled} disabled={action.busy || !state.nativeProtocol?.configuration_editable || f.stage === "removed"} onChange={(e) => void action.run(async () => { await native("experimentalFeature/enablement/set", { enablement: { [f.name]: e.target.checked } }); await features.refresh(); })} /></SettingRow>)}</div>
+    <div className="desktop-settings-group">{features.data?.filter((f) => `${f.name} ${f.displayName}`.toLowerCase().includes(featureSearch.toLowerCase())).map((f) => <SettingRow key={f.name} label={f.displayName || f.name} description={f.description || f.stage}><input type="checkbox" role="switch" aria-label={f.displayName || f.name} checked={f.enabled} disabled={action.busy || !state.nativeProtocol?.configuration_editable || f.stage === "removed"} onChange={(e) => {
+      const enabled = e.target.checked;
+      void action.run(async () => {
+        if (f.name === "step_model_switching") {
+          const snapshot = await native("config/read", { includeLayers: true, cwd });
+          const layer = snapshot.layers?.find((row: Obj) => row.name.type === "user");
+          if (!layer) throw new Error("未找到可写用户配置");
+          await native("config/batchWrite", { edits: [{ keyPath: "features.step_model_switching", value: enabled, mergeStrategy: "replace" }],
+            filePath: layer.name.file, expectedVersion: layer.version, reloadUserConfig: true });
+          await store.refreshRuntimeDefaults();
+        } else await native("experimentalFeature/enablement/set", { enablement: { [f.name]: enabled } });
+        await features.refresh();
+      }, f.name === "step_model_switching" ? "配置已保存，新建聊天后生效。已有运行中的聊天不会立即切换。" : "已更新");
+    }} /></SettingRow>)}</div>
     <Feedback error={action.error || requirements.error || capabilities.error || features.error} status={action.status} />
   </section>;
 }

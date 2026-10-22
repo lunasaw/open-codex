@@ -19,5 +19,7 @@ codex-agent = "codex_agent.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"codex_agent" = ["protocol/*.json"]
+"codex_agent" = ["protocol/*.json", "skills/imagegen-api/*.md", "skills/imagegen-api/*.txt",
+                  "skills/imagegen-api/agents/*.yaml", "skills/imagegen-api/assets/*",
+                  "skills/imagegen-api/references/*.md", "skills/imagegen-api/scripts/*.py"]
 "codex_agent.console" = ["static/*.html", "static/*.js", "static/*.css", "static/*.txt", "static/assets/*.js", "static/assets/*.css", "static/math-fonts/*.woff2"]
