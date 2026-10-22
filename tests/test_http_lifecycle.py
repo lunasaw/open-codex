@@ -54,6 +54,15 @@ class HTTPIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             line = await anext(lines)
                         self.assertEqual(await anext(lines), 'event: observation')
                         self.assertEqual(json.loads((await anext(lines))[6:])['payload']['public']['status'], 'completed')
+                        events.retire_sessions({'native-s': 's'})
+                        await events.flush()
+                        async with asyncio.timeout(3):
+                            while await anext(lines) != 'event: snapshot_required':
+                                pass
+                        self.assertEqual(json.loads((await anext(lines))[6:])['reason'], 'history_cleaned')
+                    snapshot = (await client.get('/api/sessions/s/snapshot')).json()
+                    self.assertEqual(snapshot['messages'], [])
+                    self.assertEqual(snapshot['history_revision'], 1)
             finally:
                 server.should_exit = True
                 await asyncio.wait_for(task, 5)

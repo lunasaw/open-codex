@@ -8,6 +8,7 @@ def object_value(value):
 class Correlator:
     def __init__(self):
         self.pending, self.threads, self.turns = {}, {}, {}
+        self.processes = {}
 
     def process(self, entry):
         payload, direction = entry['payload'], entry['direction']
@@ -24,6 +25,12 @@ class Correlator:
             method = prior.get('method')
             context = {**prior, **context}
         params, result = object_value(payload.get('params')), object_value(payload.get('result'))
+        process_id = params.get('processId') or params.get('processHandle')
+        if process_id:
+            if context.get('session_id'):
+                self.processes[(runtime, process_id)] = context['session_id']
+            elif (runtime, process_id) in self.processes:
+                context['session_id'] = self.processes[(runtime, process_id)]
         ids = {}
         for name in ('thread', 'turn', 'item', 'call'):
             direct = params.get(name + 'Id')
@@ -48,4 +55,5 @@ class Correlator:
             self.pending[(runtime, direction, type(rpc_id).__name__, rpc_id)] = row
         if kind == 'runtime_closed':
             self.pending = {key: value for key, value in self.pending.items() if key[0] != runtime}
+            self.processes = {key: value for key, value in self.processes.items() if key[0] != runtime}
         return row, bindings

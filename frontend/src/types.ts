@@ -73,6 +73,7 @@ export type Turn = {
 };
 export type Snapshot = {
   epoch: string;
+  history_revision?: number;
   watermark: string;
   next_page: string | null;
   messages?: Message[];
@@ -91,6 +92,7 @@ export type NativeEvent = {
   redactions: unknown[];
 };
 export type EventPage = {
+  history_revision?: number;
   events: NativeEvent[];
   watermark: string;
   next_cursor: string;
@@ -130,6 +132,6 @@ export type NativeProtocol = {
 export type Health = {
   epoch: string;
   host_ready: boolean;
-  observation: { status: string };
+  observation: { status: string; history_revision?: number };
   [key: string]: unknown;
 };

@@ -8,6 +8,7 @@ from .correlation import Correlator
 from .models import EventQuery, ObservationBatch
 from .observer import ConsoleObserver
 from .projection import Projector, redact
+from .retention import RetiredScopes
 from .ports import StoreUnavailable, InvalidCursor, CursorAhead, UnknownEvent
 
 
@@ -53,6 +54,12 @@ class ConsoleObservationService:
     def bind(self, session_id, thread_id):
         self.append(session_id, {'kind': 'binding', 'thread_id': thread_id})
 
+    def retire_sessions(self, scopes):
+        self.observer.queue.put_nowait({'retention': 'retire', 'scopes': scopes})
+
+    def allow_session(self, thread_id):
+        self.observer.queue.put_nowait({'retention': 'allow', 'thread_id': thread_id})
+
     def diagnostic(self, kind, *, runtime_instance_id=None, **detail):
         if kind == 'observation_error':
             self._incomplete = 'capture_failed'
@@ -71,6 +78,12 @@ class ConsoleObservationService:
             row.update(kind=entry['kind'] or 'correlation_failed', method=entry['payload'].get('method'),
                        rpc_id=entry['payload'].get('id'), correlation='unavailable')
             bindings = []
+        policy = RetiredScopes(self.store.retired_scopes)
+        if policy.owns(row):
+            return None
+        entry['payload'] = policy.payload(entry['payload'])
+        if entry['payload'] is None:
+            return None
         self._seq += 1
         row.update(schema_version='codex-agent.console.event/v1', epoch=self.epoch,
                    seq=str(self._seq), event_id=f'{self.epoch}:{self._seq}')
@@ -105,11 +118,19 @@ class ConsoleObservationService:
     async def _write(self):
         while True:
             entry = await self.observer.queue.get()
-            self._batch = self._event(entry)
+            self._batch = None if 'retention' in entry else self._event(entry)
             delay = .05
             while True:
                 try:
-                    await self.store.commit(self._batch)
+                    if entry.get('retention') == 'retire':
+                        await self.store.retire_sessions(entry['scopes'])
+                        threads = set(entry['scopes'])
+                        self.projector.user_items = {k: v for k, v in self.projector.user_items.items() if k[0] not in threads}
+                        self.projector.request_user_items = {k: v for k, v in self.projector.request_user_items.items() if k[0] not in threads}
+                    elif entry.get('retention') == 'allow':
+                        await self.store.allow_session(entry['thread_id'])
+                    elif self._batch is not None:
+                        await self.store.commit(self._batch)
                     self._error = None
                     break
                 except Exception as exc:
@@ -132,7 +153,7 @@ class ConsoleObservationService:
         await self.start()
         if self._error and not self._retry.is_set():
             raise StoreUnavailable(self._error)
-        await asyncio.wait_for(self.observer.queue.join(), 10)
+        await asyncio.wait_for(self.observer.queue.join(), 300)
 
     async def read_events(self, query):
         return self._coverage(await self.store.read_events(query))
@@ -153,6 +174,8 @@ class ConsoleObservationService:
         if seq == 0:
             raise UnknownEvent('zero is a cursor, not an event')
         page = await self.read_events(EventQuery(after=f'{self.epoch}:{seq - 1}', until=event_id, limit=1))
+        if not page['events']:
+            raise UnknownEvent('event was removed by session retention')
         return page['events'][0]
 
     def _coverage(self, result):
@@ -166,9 +189,11 @@ class ConsoleObservationService:
         pending = self.observer.queue.qsize() + (1 if self._batch else 0)
         error = self._error or self.observer.error or self._incomplete
         status = 'unavailable' if self._error else 'incomplete' if error else 'lagging' if pending else 'ready'
-        return {**CAPABILITIES, 'storage': {'backend': stats['backend'], 'retention': stats['retention']},
+        return {**CAPABILITIES, 'storage': {'backend': stats['backend'], 'retention': stats['retention'],
+                    **{key: stats[key] for key in ('cleanup', 'maintenance_error') if key in stats}},
                 'epoch': self.epoch, 'runtime_instance_id': self.runtime_instance_id,
                 'observation': {'status': status, 'captured_seq': str(self._seq + self.observer.queue.qsize()),
+                    'history_revision': self.store.history_revision,
                     'committed_seq': stats['watermark'].split(':')[1], 'pending_events': pending,
                     'event_count': stats['event_count'], 'encoded_bytes': stats['encoded_bytes'], 'error': error}}
 

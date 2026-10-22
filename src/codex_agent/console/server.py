@@ -116,6 +116,7 @@ class ConsoleApp:
         batch = await self.events.read_events(query)
         baseline = await self.events.read_events(replace(query, until=query.after or self.events.epoch + ':0'))
         binding_version = baseline['binding_version']
+        history_revision = baseline.get('history_revision', 0)
         self._streams += 1
         async def disconnect():
             while (await receive()).get('type') != 'http.disconnect':
@@ -128,6 +129,9 @@ class ConsoleApp:
             await asyncio.wait_for(send({'type': 'http.response.start', 'status': 200, 'headers': [
                 (b'content-type', b'text/event-stream'), (b'cache-control', b'no-store'), (b'x-accel-buffering', b'no')]}), 10)
             while True:
+                if batch.get('history_revision', 0) != history_revision:
+                    await frame('snapshot_required', {'reason': 'history_cleaned'})
+                    break
                 if query.session_id and batch['binding_version'] != binding_version:
                     await frame('snapshot_required', {'reason': 'binding_changed', 'binding_version': batch['binding_version']})
                     break
@@ -240,7 +244,9 @@ class ConsoleApp:
                 params = {**params, 'env': {**(params.get('env') or {}), **variables}}
             self.host.store.write(path, {'digest': digest, 'status': 'intent_recorded'})
             try:
-                result = await self.host.native.call(body['method'], params, key)
+                from .observer import observation_context
+                with observation_context(session_id=body.get('session_id')):
+                    result = await self.host.native.call(body['method'], params, key)
             except RpcError as exc:
                 self.host.store.write(path, {'digest': digest, 'error': redact(exc.error)[0]})
                 raise
