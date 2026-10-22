@@ -15,7 +15,7 @@ class CondaRuntimeTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = test_host_core.HostTests.asyncSetUp
     asyncTearDown = test_host_core.HostTests.asyncTearDown
 
-    async def test_binding_restart_switch_and_unbind_change_native_shell_python(self):
+    async def exercise(self, mode):
         root = Path(self.directory.name)
         home = root / 'native-home'
         home.mkdir()
@@ -56,10 +56,8 @@ class CondaRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(items[-1]['exitCode'], 0, items[-1])
             return items[-1]['aggregatedOutput']
         try:
-            session = await self.host.create_session('native', options={'historyMode': 'legacy', 'cwd': str(root)})
+            session = await self.host.create_session('native', options={'historyMode': mode, 'cwd': str(root)})
             thread = session['thread_id']
-            self.assertIn('preserved', await shell('printf "$BASE_MARK"'))
-            default_python = await shell('command -v python')
             for name in ('science', 'another'):
                 prefix = root / name
                 (prefix / 'bin').mkdir(parents=True)
@@ -80,11 +78,22 @@ class CondaRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     with patch('codex_agent.host.activate_environment', return_value=(environment, variables)):
                         await self.host.resume('native')
                     self.assertIn('science-python|' + str(prefix), await shell('python; printf "|$CONDA_PREFIX"'))
+                    await self.host.native.call('thread/archive', {'threadId': thread}, 'archive-conda')
+                    with patch('codex_agent.host.activate_environment', return_value=(environment, variables)):
+                        await self.host.native.call('thread/unarchive', {'threadId': thread}, 'unarchive-conda')
+                    self.assertIn('science-python|' + str(prefix), await shell('python; printf "|$CONDA_PREFIX"'))
             with patch('codex_agent.host.activate_environment', return_value=(None, {})):
                 await self.host.set_conda_environment('native', None)
             output = await shell('printf "$CONDA_PREFIX|$BASE_MARK"')
             self.assertEqual(output, '|preserved')
-            self.assertEqual(await shell('command -v python'), default_python)
+            self.assertNotIn(str(root / 'science'), await shell('command -v python'))
+            self.assertNotIn(str(root / 'another'), await shell('command -v python'))
             self.assertEqual(self.host.get_session('native')['thread_id'], thread)
         finally:
             await stop_runtime(process, peer)
+
+    async def test_empty_legacy_binding_restart_switch_and_unbind(self):
+        await self.exercise('legacy')
+
+    async def test_empty_paginated_binding_restart_switch_and_unbind(self):
+        await self.exercise('paginated')

@@ -26,6 +26,7 @@ node ../tests/test_activity_scroll_browser.cjs
 node ../tests/test_conversation_parity.cjs
 node ../tests/test_workbench_browser.cjs
 node ../tests/test_conda_environment_browser.cjs
+node ../tests/test_session_retention_browser.cjs
 node ../tests/test_sidebar_resize_browser.cjs
 node ../tests/test_copy_reply_browser.cjs
 node ../tests/test_message_markdown_browser.cjs
@@ -249,3 +250,5 @@ Python 208 项中 203 通过、5 项历史探针跳过；前端 104 项通过，
 （预期新增 2 行，实际 1 行），不属于此次配置修复范围。
 修复构建成功并完成实测后，再次构建时工作区出现新的 `turn-file-changes.tsx` 引用，
 但对应 `turn-file-changes.css` 尚不存在，导致该次打包失败；没有替换已验证的静态入口。
+
+`test_session_retention.py` 和原生 `test_thread_lifecycle.py` 验证归档清理、删除失败保留、原生 JSONL 生命周期、重启恢复与磁盘回收。`test_session_retention_browser.cjs` 验证已打开标签页及断线重连后的清理同步。

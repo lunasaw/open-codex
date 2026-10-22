@@ -1295,13 +1295,22 @@ export class ConsoleStore {
                 ConsoleTransport.compareCursor(data.cursor, cursor) >= 0
               )
                 cursor = data.cursor;
-              else if (frame.event === "status" && this.state.health)
-                this.patch({ health: { ...this.state.health, observation: data } });
+              else if (frame.event === "status") {
+                const revision = global ? this.state.eventPage?.history_revision : this.state.snapshot?.history_revision;
+                if (revision !== undefined && data.history_revision !== undefined && revision !== data.history_revision)
+                  throw new ApiError("SNAPSHOT_REQUIRED", 409);
+                if (this.state.health) this.patch({ health: { ...this.state.health, observation: data } });
+              }
             }, activity);
           });
           delay = 300;
         } catch (error) {
           if (controller.signal.aborted || version !== this.generation) return;
+          if (error instanceof ApiError && error.code === "UNKNOWN_SESSION") {
+            await this.select(null);
+            await this.refreshSessions().catch(this.fail);
+            return;
+          }
           if (
             error instanceof ApiError &&
             ["EPOCH_MISMATCH", "CURSOR_AHEAD", "SNAPSHOT_REQUIRED"].includes(

@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 sys.path.insert(0, str(ROOT / 'scripts'))
 from codex_agent.app import build_host
 from codex_agent.config import AgentConfig
-from codex_agent.console.models import SnapshotQuery
+from codex_agent.console.models import EventQuery, SnapshotQuery
 from codex_agent.rpc import RpcError
 from runtime_probe import MockModel, mock_config
 
@@ -28,6 +28,7 @@ class ThreadLifecycleTests(unittest.IsolatedAsyncioTestCase):
             package = Path(os.environ['CODEX_TEST_RUNTIME_PACKAGE'])
             config = AgentConfig.from_dict({'schema_version': 'codex-agent/v2',
                 'paths': {'codex_home': 'home', 'runtime_dir': str(package), 'state_dir': 'state', 'workspace_dir': 'workspace'},
+                'console': {'storage': {'backend': 'sqlite'}},
                 'codex': {'binary': str(package / 'bin/codex'), 'runtime_version': 'codex-cli 0.163.0'}}, root)
             host, _ = build_host(config, development=True)
             async def send(session_id, key):
@@ -66,9 +67,20 @@ class ThreadLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len((await host.client.read_thread(tid))['thread']['turns']), len(expected))
                 await send('original', 'after-rollback')
                 await host.native.call('thread/archive', {'threadId': tid}, 'archive-1')
+                self.assertEqual((await host.events.read_events(EventQuery(session_id='original')))['events'], [])
+                self.assertTrue(list((root / 'home/archived_sessions').rglob(f'*{tid}*.jsonl')))
+                # A restart must preserve suppression and still allow native restoration.
+                await host.stop()
+                await host.events.close()
+                host, _ = build_host(config, development=True)
+                await host.start()
+                await host.events.flush()
+                self.assertEqual((await host.events.read_events(EventQuery(session_id='original')))['events'], [])
                 self.assertTrue(host.get_session('original')['archived'])
                 await host.native.call('thread/unarchive', {'threadId': tid}, 'unarchive-1')
                 self.assertFalse(host.get_session('original')['archived'])
+                await host.events.flush()
+                self.assertTrue((await host.events.snapshot(SnapshotQuery('original')))['messages'])
                 await send('original', 'after-unarchive')
                 # Active turns cannot be destructively modified.
                 session = host._session('original')
@@ -84,6 +96,10 @@ class ThreadLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     await host.native.call('thread/delete', {'threadId': fork_session['thread_id']}, 'delete-fork')
                 await host.native.call('thread/delete', {'threadId': tid}, 'delete-1')
                 self.assertIsNone(host.get_session('original'))
+                await host.events.flush()
+                self.assertEqual((await host.events.read_events(EventQuery(session_id='original')))['events'], [])
+                for subdir in ('sessions', 'archived_sessions'):
+                    self.assertFalse(list((root / 'home' / subdir).rglob(f'*{tid}*.jsonl')))
                 self.assertNotIn('original', [s['id'] for s in host.list_sessions()])
                 # Independent forks survive deleting their source.
                 if mode == 'legacy':

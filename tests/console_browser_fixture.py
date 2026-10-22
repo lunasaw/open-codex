@@ -205,10 +205,18 @@ class FixtureNative(NativeBridge):
             return {'thread': {'id': thread_id, 'historyMode': 'paginated', 'projectId': self.host.sessions.get(thread_id, {}).get('settings', {}).get('projectId'), 'section': self.host.thread_sections.get(self.host.sessions.get(thread_id, {}).get('section_id')), 'turns': copy.deepcopy(self.host.turns.get(thread_id, []))}}
         if method in {'thread/archive', 'thread/unarchive'}:
             self.host.sessions[thread_id]['archived'] = method == 'thread/archive'
+            if method == 'thread/archive':
+                self.host.events.retire_sessions({thread_id: thread_id})
+            else:
+                self.host.events.allow_session(thread_id)
+                self.host.restore_thread(thread_id)
+            await self.host.events.flush()
             return {}
         if method == 'thread/delete':
             del self.host.sessions[thread_id]
             self.host.turns.pop(thread_id, None)
+            self.host.events.retire_sessions({thread_id: thread_id})
+            await self.host.events.flush()
             return {}
         if method == 'thread/fork':
             source = self.host.sessions[thread_id]

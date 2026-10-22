@@ -13,7 +13,7 @@ import uuid
 
 from jsonschema import Draft7Validator
 
-from .console.observer import observation_context
+from .console.observer import observation_context, native_context
 from .console.projection import redact
 from .state import payload_digest
 from .rpc import RpcError
@@ -206,7 +206,7 @@ class NativeBridge:
                            and session['status'] == 'running' and session.get('active_turn_id'))
         if method == 'thread/shellCommand' and not auxiliary_shell and session and session['status'] != 'ready':
             raise ValueError('wait for the active turn identity before running a shell command')
-        context = {'thread_id': thread_id, 'session_id': session['id'] if session else None,
+        context = {'thread_id': thread_id, 'session_id': session['id'] if session else (native_context.get() or {}).get('session_id'),
                    'host_request_id': request_id}
         # Reviews and queued submissions start agent turns, so reserve their
         # admission slot before the native notification can arrive.
@@ -343,6 +343,17 @@ class NativeBridge:
                     if session['status'] != 'closed':
                         session['status'] = 'recovery_required'
             host._save(session)
+        if method == 'thread/unarchive' and session and session.get('conda_environment'):
+            # The native restore uses its defaults; reapply the Host's saved
+            # environment before accepting commands on the restored chat.
+            host._attached.discard(session['id'])
+            host._conda_environments.pop(session['id'], None)
+            session['status'] = 'recovery_required'
+            host._save(session)
+            result['session'] = await host._resume_session(session['id'])
+        if method in {'thread/archive', 'thread/delete'}:
+            host.events.retire_sessions({thread_id: session['id'] if session else None})
+            await host.events.flush()
         if session and method == 'thread/revert':
             thread = (await host.client.read_thread(thread_id))['thread']
             host.restore_thread(session['id'], thread)

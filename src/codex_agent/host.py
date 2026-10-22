@@ -13,6 +13,7 @@ from jsonschema import Draft202012Validator
 from .state import AtomicJsonStore, identifier, payload_digest, single_writer_lock
 from .console.observer import observation_context
 from .native import NativeBridge, PROTOCOL
+from .rpc import RpcError
 from .mcp_app_context import with_app_context
 from .conda import activate_environment, runtime_overrides
 
@@ -78,6 +79,12 @@ class AgentHost:
             self.client = self.client_factory()
             if inspect.isawaitable(self.client):
                 self.client = await self.client
+            retired = {}
+            for path in (self.store.root / 'sessions').glob('*.json'):
+                saved = self.store.read(str(path.relative_to(self.store.root)))
+                if saved.get('archived') or saved.get('deleted'):
+                    retired[saved['thread_id']] = saved['id']
+            self.events.retire_sessions(retired)
             # A persisted active turn is an observation problem, never a new submission.
             for session in self.list_sessions():
                 if (self.configuration_changed and not session.get('active_turn_id') and
@@ -88,6 +95,7 @@ class AgentHost:
                 if session['status'] != 'closed':
                     session['status'] = 'recovery_required'
                     self._save(session)
+            await self.events.flush()
             self.ready = True
             self._reconcile_task = asyncio.create_task(self._reconcile_loop())
         except BaseException:
@@ -170,7 +178,7 @@ class AgentHost:
         self._attached.discard(session['id'])
         self._active_turns = self._count_active_turns()
         self._save(session)
-        self.events.append(session['id'], {'kind': 'session', 'public': {'status': 'deleted'}})
+        self.events.retire_sessions({session['thread_id']: session['id']})
 
     async def _check_admission(self):
         self.assert_ready()
@@ -386,9 +394,14 @@ class AgentHost:
                 session['cwd'] = updated['cwd']
             self._save(session)
             return
-        if session and method == 'thread/deleted':
-            self.mark_deleted(session)
+        if method == 'thread/deleted':
+            if session:
+                self.mark_deleted(session)
+            elif params.get('threadId'):
+                self.events.retire_sessions({params['threadId']: None})
             return
+        if method == 'thread/archived' and params.get('threadId'):
+            self.events.retire_sessions({params['threadId']: session['id'] if session else None})
         if session and method in {'thread/archived', 'thread/unarchived'}:
             session['archived'] = method == 'thread/archived'
             if session['archived']:
@@ -475,97 +488,121 @@ class AgentHost:
         except HostNotReady as exc:
             raise ResumeRejected(str(exc), code='runtime-unavailable') from exc
         async with self._admission:
-            session = self._session(session_id)
-            if not session:
-                raise KeyError(session_id)
-            persisted = self.store.read(f'sessions/{session_id}.json')
-            if persisted != session:
-                raise ResumeRejected('session state changed', code='session-state-changed')
-            if session['status'] == 'closed':
-                raise ResumeRejected('session closed', code='session-closed')
-            mismatches = {k for k, v in self.bindings.items() if session.get(k) != v}
-            extension_drift = mismatches == {'extensions_sha256'}
-            if mismatches and not (extension_drift and self.extension_rebinder):
-                code = 'session-extensions-changed' if mismatches == {'extensions_sha256'} else 'session-binding-mismatch'
-                raise ResumeRejected('session binding mismatch', code=code)
-            if session['id'] in self._attached and session.get('active_turn_id'):
-                raise ResumeRejected('turn still active', code='session-turn-active')
-            if conda_prefix is not _UNCHANGED and (session.get('active_turn_id') or session.get('active_request_id')
-                    or session['status'] in {'starting', 'running', 'interrupting', 'closing'}):
-                raise ValueError('请在当前回复结束后切换 Conda 环境')
-            for path in (self.store.root / 'tool-calls').glob('*.json'):
-                call = self.store.read(str(path.relative_to(self.store.root)))
-                if call['identity']['session_id'] == session_id and call['state'] != 'receipt_saved':
-                    raise ResumeRejected('tool outcome unknown; reconcile operation before resume', code='session-operation-unresolved')
+            return await self._resume_session(session_id, options=options, conda_prefix=conda_prefix)
+
+    async def _resume_session(self, session_id, *, options=None, conda_prefix=_UNCHANGED):
+        """Resume while the caller owns the admission lock."""
+        session = self._session(session_id)
+        if not session:
+            raise KeyError(session_id)
+        persisted = self.store.read(f'sessions/{session_id}.json')
+        if persisted != session:
+            raise ResumeRejected('session state changed', code='session-state-changed')
+        if session['status'] == 'closed':
+            raise ResumeRejected('session closed', code='session-closed')
+        mismatches = {k for k, v in self.bindings.items() if session.get(k) != v}
+        extension_drift = mismatches == {'extensions_sha256'}
+        if mismatches and not (extension_drift and self.extension_rebinder):
+            code = 'session-extensions-changed' if mismatches == {'extensions_sha256'} else 'session-binding-mismatch'
+            raise ResumeRejected('session binding mismatch', code=code)
+        if session['id'] in self._attached and session.get('active_turn_id'):
+            raise ResumeRejected('turn still active', code='session-turn-active')
+        if conda_prefix is not _UNCHANGED and (session.get('active_turn_id') or session.get('active_request_id')
+                or session['status'] in {'starting', 'running', 'interrupting', 'closing'}):
+            raise ValueError('请在当前回复结束后切换 Conda 环境')
+        for path in (self.store.root / 'tool-calls').glob('*.json'):
+            call = self.store.read(str(path.relative_to(self.store.root)))
+            if call['identity']['session_id'] == session_id and call['state'] != 'receipt_saved':
+                raise ResumeRejected('tool outcome unknown; reconcile operation before resume', code='session-operation-unresolved')
+        try:
+            await self._check_admission()
+        except HostNotReady as exc:
+            raise ResumeRejected(str(exc), code='runtime-unavailable') from exc
+        try:
+            observed = await self.client.read_thread(session['thread_id'])
+        except RpcError as exc:
+            # Native 0.163 cannot hydrate an unsaved empty thread. Naming
+            # persists it through the native API, before unsubscribe could
+            # discard its only live state. Do not invent a user turn.
+            empty_history = ('is not materialized yet' in str(exc) or
+                             str(exc) == 'list_turns is not supported yet')
+            changing_environment = conda_prefix is not _UNCHANGED or session.get('conda_environment')
+            if not (changing_environment and empty_history and session_id in self._attached
+                    and not session.get('active_request_id') and not session.get('active_turn_id')):
+                raise
+            metadata = (await self.client.peer.request('thread/read', {
+                'threadId': session['thread_id'], 'includeTurns': False}))['thread']
+            if metadata.get('status', {}).get('type') != 'idle':
+                raise
+            name = metadata.get('name') or session.get('name') or '新会话 · ' + session_id[-6:]
+            await self.client.peer.request('thread/name/set', {'threadId': session['thread_id'], 'name': name})
+            observed = await self.client.read_thread(session['thread_id'])
+        thread = observed['thread']
+        if thread['id'] != session['thread_id'] or any(t.get('status') == 'inProgress' for t in thread.get('turns', [])):
+            raise ResumeRejected('native thread still active', code='session-turn-active')
+        if extension_drift:
             try:
-                await self._check_admission()
+                session = await self.extension_rebinder(dict(session), dict(self.bindings))
             except HostNotReady as exc:
                 raise ResumeRejected(str(exc), code='runtime-unavailable') from exc
-            observed = await self.client.read_thread(session['thread_id'])
-            thread = observed['thread']
-            if thread['id'] != session['thread_id'] or any(t.get('status') == 'inProgress' for t in thread.get('turns', [])):
-                raise ResumeRejected('native thread still active', code='session-turn-active')
-            if extension_drift:
-                try:
-                    session = await self.extension_rebinder(dict(session), dict(self.bindings))
-                except HostNotReady as exc:
-                    raise ResumeRejected(str(exc), code='runtime-unavailable') from exc
-                except ValueError as exc:
-                    raise ResumeRejected(str(exc), code='session-extensions-changed') from exc
-                self._sessions[session_id] = session
-            if session.get('active_request_id'):
-                turn = next((t for t in thread.get('turns', []) if t['id'] == session.get('active_turn_id')), None)
-                if not turn or turn.get('status') not in {'completed', 'failed', 'interrupted'}:
-                    raise ResumeRejected('turn outcome unknown', code='session-turn-unresolved')
-                path = f"requests/{session['active_request_id']}.json"
-                record = self.store.read(path)
-                record.update(turn_id=turn['id'], status=turn['status'])
-                self.store.write(path, record)
-            reload_environment = (conda_prefix is not _UNCHANGED or bool(session.get('conda_environment'))
-                                  or session.get('environment_reload_required', False))
-            saved_settings = copy.deepcopy(session.get('settings', {}))
-            if reload_environment:
-                prefix = (session.get('conda_environment') or {}).get('prefix') if conda_prefix is _UNCHANGED else conda_prefix
-                environment, variables = await asyncio.to_thread(activate_environment, prefix)
-                resume_schema = PROTOCOL.schema('thread/resume')
-                resume_fields = resume_schema['definitions']['ThreadResumeParams']['properties']
-                options = {**{k: v for k, v in saved_settings.items() if k in resume_fields}, **(options or {})}
-                config = dict(options.get('config') or {})
-                if environment:
-                    native_config = await self.client.peer.request('config/read', {'includeLayers': False, 'cwd': session.get('cwd')})
-                    excludes = (native_config.get('config', {}).get('shell_environment_policy') or {}).get('exclude') or []
-                    config = runtime_overrides(config, variables, excludes=excludes)
-                options['config'] = config
-                # Native resume only reloads an idle thread with overrides after
-                # this connection unsubscribes. Persist intent before detaching.
-                session.update(status='recovery_required', conda_environment=environment, environment_reload_required=True)
-                self._save(session)
-                self._attached.discard(session_id)
-                self._conda_environments.pop(session_id, None)
-                await self.client.peer.request('thread/unsubscribe', {'threadId': session['thread_id']})
-            await self.client.resume(session['thread_id'], **({'options': options} if options else {}))
-            if reload_environment:
-                fields = PROTOCOL.schema('thread/settings/update')['definitions']['ThreadSettingsUpdateParams']['properties']
-                settings = {k: v for k, v in saved_settings.items() if k in fields and k != 'threadId'}
-                if settings.get('permissions'):
-                    settings.pop('sandboxPolicy', None)
-                if settings:
-                    await self.client.peer.request('thread/settings/update', {'threadId': session['thread_id'], **settings})
-                self._conda_environments[session_id] = variables
-                session.pop('environment_reload_required', None)
-            if self.configuration_changed:
-                await self.configuration_changed()
-                session.update(self.bindings)
-            self.restore_thread(session_id, thread)
-            session.update(status='ready', active_turn_id=None, active_request_id=None)
+            except ValueError as exc:
+                raise ResumeRejected(str(exc), code='session-extensions-changed') from exc
+            self._sessions[session_id] = session
+        if session.get('active_request_id'):
+            turn = next((t for t in thread.get('turns', []) if t['id'] == session.get('active_turn_id')), None)
+            if not turn or turn.get('status') not in {'completed', 'failed', 'interrupted'}:
+                raise ResumeRejected('turn outcome unknown', code='session-turn-unresolved')
+            path = f"requests/{session['active_request_id']}.json"
+            record = self.store.read(path)
+            record.update(turn_id=turn['id'], status=turn['status'])
+            self.store.write(path, record)
+        reload_environment = (conda_prefix is not _UNCHANGED or bool(session.get('conda_environment'))
+                              or session.get('environment_reload_required', False))
+        saved_settings = copy.deepcopy(session.get('settings', {}))
+        if reload_environment:
+            prefix = (session.get('conda_environment') or {}).get('prefix') if conda_prefix is _UNCHANGED else conda_prefix
+            environment, variables = await asyncio.to_thread(activate_environment, prefix)
+            resume_schema = PROTOCOL.schema('thread/resume')
+            resume_fields = resume_schema['definitions']['ThreadResumeParams']['properties']
+            options = {**{k: v for k, v in saved_settings.items() if k in resume_fields}, **(options or {})}
+            config = dict(options.get('config') or {})
+            if environment:
+                native_config = await self.client.peer.request('config/read', {'includeLayers': False, 'cwd': session.get('cwd')})
+                excludes = (native_config.get('config', {}).get('shell_environment_policy') or {}).get('exclude') or []
+                config = runtime_overrides(config, variables, excludes=excludes)
+            options['config'] = config
+            # Native resume only reloads an idle thread with overrides after
+            # this connection unsubscribes. Persist intent before detaching.
+            session.update(status='recovery_required', conda_environment=environment, environment_reload_required=True)
             self._save(session)
-            self._attached.add(session_id)
-            self._cancels.pop(session_id, None)
-            self._active_turns = self._count_active_turns()
-            self.events.append(session_id, {'kind': 'session', 'public': {'status': 'resumed'}})
-            return dict(session)
+            self._attached.discard(session_id)
+            self._conda_environments.pop(session_id, None)
+            await self.client.peer.request('thread/unsubscribe', {'threadId': session['thread_id']})
+        await self.client.resume(session['thread_id'], **({'options': options} if options else {}))
+        if reload_environment:
+            fields = PROTOCOL.schema('thread/settings/update')['definitions']['ThreadSettingsUpdateParams']['properties']
+            settings = {k: v for k, v in saved_settings.items() if k in fields and k != 'threadId'}
+            if settings.get('permissions'):
+                settings.pop('sandboxPolicy', None)
+            if settings:
+                await self.client.peer.request('thread/settings/update', {'threadId': session['thread_id'], **settings})
+            self._conda_environments[session_id] = variables
+            session.pop('environment_reload_required', None)
+        if self.configuration_changed:
+            await self.configuration_changed()
+            session.update(self.bindings)
+        self.restore_thread(session_id, thread)
+        session.update(status='ready', active_turn_id=None, active_request_id=None)
+        self._save(session)
+        self._attached.add(session_id)
+        self._cancels.pop(session_id, None)
+        self._active_turns = self._count_active_turns()
+        self.events.append(session_id, {'kind': 'session', 'public': {'status': 'resumed'}})
+        return dict(session)
 
     def restore_thread(self, session_id, thread):
+        self.events.allow_session(thread['id'])
+        self.events.bind(session_id, thread['id'])
         session = self._session(session_id)
         turns = thread.get('turns', [])
         if session and turns and not any(t.get('status') == 'inProgress' for t in turns):

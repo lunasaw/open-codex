@@ -1,4 +1,4 @@
-"""One-writer, process-lifetime log. No TTL, eviction, file I/O or sampling."""
+"""One-writer observation log with stable cursors across session cleanup."""
 from __future__ import annotations
 
 import asyncio
@@ -24,7 +24,10 @@ class MemoryConsoleObservationStore:
     def __init__(self):
         self.epoch = None
         self._closed = False
-        self._events, self._changes, self._bindings = [], [], []
+        self._events, self._changes, self._bindings = {}, [], []
+        self._watermark = 0
+        self.history_revision = 0
+        self.retired_scopes = {}
         self._batches = {}
         self._bytes = 0
         self._condition = asyncio.Condition()
@@ -52,7 +55,7 @@ class MemoryConsoleObservationStore:
         if epoch != self.epoch:
             raise EpochMismatch('event history reset')
         value = int(seq)
-        if value > len(self._events):
+        if value > self._watermark:
             raise CursorAhead('cursor exceeds committed watermark')
         return value
 
@@ -76,7 +79,7 @@ class MemoryConsoleObservationStore:
             return dict(receipt)
         if not batch.batch_id or not batch.events:
             raise ValueError('nonempty batch required')
-        start = len(self._events) + 1
+        start = self._watermark + 1
         for seq, event in enumerate(batch.events, start):
             if event.get('seq') != str(seq):
                 raise SequenceGap('events must continue the committed sequence')
@@ -97,7 +100,8 @@ class MemoryConsoleObservationStore:
         events, changes = copy.deepcopy((batch.events, batch.changes))
         await self._before_publish(batch)
         async with self._condition:
-            self._events.extend(events)
+            self._events.update((int(row['seq']), row) for row in events)
+            self._watermark = end
             self._changes.extend(changes)
             self._bindings.extend(c for c in changes if c.get('type') == 'binding')
             self._bytes += sum(len(encoded(event)) for event in events)
@@ -125,7 +129,7 @@ class MemoryConsoleObservationStore:
     async def read_events(self, query: EventQuery):
         self._check()
         self._limit(query.limit)
-        after, until = self._seq(query.after, 0), self._seq(query.until, len(self._events))
+        after, until = self._seq(query.after, 0), self._seq(query.until, self._watermark)
         if after > until:
             raise InvalidCursor('after exceeds until')
         if query.filters.keys() - {'method', 'kind', 'direction', 'source', 'session_id', 'thread_id', 'turn_id', 'item_id', 'call_id', 'unbound'}:
@@ -133,8 +137,10 @@ class MemoryConsoleObservationStore:
         bindings, version = self._binding(until)
         found, scanned = [], after
         for idx in range(after, until):
-            row = self._events[idx]
             scanned = idx + 1
+            row = self._events.get(scanned)
+            if row is None:
+                continue
             session = self._session(row, bindings)
             if query.session_id and session != query.session_id:
                 continue
@@ -149,7 +155,7 @@ class MemoryConsoleObservationStore:
                 break
         return {'epoch': self.epoch, 'events': found, 'next_cursor': self._cursor(scanned),
                 'watermark': self._cursor(until), 'has_more': scanned < until,
-                'binding_version': version, 'coverage': {'status': 'complete', 'reason': None}}
+                'binding_version': version, 'history_revision': self.history_revision, 'coverage': {'status': 'complete', 'reason': None}}
 
     def _token(self, value):
         payload = base64.urlsafe_b64encode(encoded(value)).decode().rstrip('=')
@@ -172,9 +178,10 @@ class MemoryConsoleObservationStore:
         self._limit(query.limit)
         if query.view not in {'all', 'messages', 'turns', 'steps'}:
             raise ValueError('unknown view')
-        context = {'session': query.session_id, 'turn': query.turn_id, 'view': query.view, 'limit': query.limit}
+        context = {'session': query.session_id, 'turn': query.turn_id, 'view': query.view, 'limit': query.limit,
+                   'history_revision': self.history_revision}
         before = {}
-        until = self._seq(query.until, len(self._events))
+        until = self._seq(query.until, self._watermark)
         if query.page:
             page = self._decode(query.page)
             if page.get('context') != context or (query.until and query.until != page.get('until')):
@@ -224,27 +231,61 @@ class MemoryConsoleObservationStore:
             more = more or start > 0
         token = self._token({'context': context, 'until': self._cursor(until), 'before': next_before}) if more else None
         return {**output, 'epoch': self.epoch, 'watermark': self._cursor(until), 'next_page': token,
-                'binding_version': version, 'history_start': self._cursor(1 if until else 0),
+                'binding_version': version, 'history_revision': self.history_revision,
+                'history_start': self._cursor(1 if until else 0),
                 'coverage': {'status': 'complete', 'reason': None}}
 
     async def wait_for_change(self, after, timeout):
         self._check()
         seq = self._seq(after, 0)
+        revision = self.history_revision
         async with self._condition:
             try:
-                await asyncio.wait_for(self._condition.wait_for(lambda: self._closed or len(self._events) > seq), timeout)
+                await asyncio.wait_for(self._condition.wait_for(lambda: self._closed or self._watermark > seq or self.history_revision != revision), timeout)
             except TimeoutError:
                 pass
             self._check()
-            return self._cursor(len(self._events))
+            return self._cursor(self._watermark)
 
     async def stats(self):
         self._check()
-        return {'epoch': self.epoch, 'watermark': self._cursor(len(self._events)), 'event_count': len(self._events),
+        return {'epoch': self.epoch, 'watermark': self._cursor(self._watermark), 'event_count': len(self._events),
                 'encoded_bytes': self._bytes, 'binding_version': len(self._bindings),
                 'view_count': len({(c.get('session_id'), c.get('thread_id'), c.get('view'), c.get('key'))
                                    for c in self._changes if c.get('view')}),
                 'backend': 'memory', 'retention': 'process_lifetime'}
+
+    def _retention_plan(self, scopes):
+        from ..retention import RetiredScopes
+        policy = RetiredScopes(scopes)
+        events = {seq: clean for seq, row in self._events.items()
+                  if (clean := policy.event(row)) is not None}
+        changes = [row for row in self._changes if not policy.owns(row)
+                   and int(row['seq']) in events]
+        return events, changes
+
+    async def _publish_retention(self, scopes, events, changes):
+        size = await asyncio.to_thread(lambda: sum(len(encoded(row)) for row in events.values()))
+        async with self._condition:
+            self.retired_scopes = scopes
+            self._events, self._changes = events, changes
+            self._bindings = [row for row in changes if row.get('type') == 'binding']
+            self._bytes = size
+            # Old batch receipts must never reintroduce pruned payloads.
+            self._batches.clear()
+            self.history_revision += 1
+            self._condition.notify_all()
+
+    async def retire_sessions(self, scopes):
+        self._check()
+        scopes = {**self.retired_scopes, **{k: v or self.retired_scopes.get(k) for k, v in scopes.items()}}
+        if scopes == self.retired_scopes:
+            return
+        events, changes = await asyncio.to_thread(self._retention_plan, scopes)
+        await self._publish_retention(scopes, events, changes)
+
+    async def allow_session(self, thread_id):
+        self.retired_scopes.pop(thread_id, None)
 
     async def close(self):
         async with self._condition:
