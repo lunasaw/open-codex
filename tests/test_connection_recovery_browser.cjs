@@ -49,12 +49,16 @@ const { chromium } = require('../frontend/node_modules/playwright');
     await page.goto(base);
     await page.locator('[data-slot="aui_user-message-root"]').filter({ hasText: 'connection-first' }).waitFor();
     await page.waitForFunction(() => document.querySelector('#health')?.textContent === '已连接');
+    // Health is loaded independently of SSE. Establish the stream and drain
+    // already-delivered chunks before advancing its idle deadline.
+    await page.waitForFunction(() => window.connectionActivity > 0);
     await page.locator('#text').fill('重连时保留的草稿');
     const draft = async () => assert.equal(await page.locator('#text').inputValue(), '重连时保留的草稿');
     const count = () => page.evaluate(() => window.connectionStreams.length);
     const before = await count();
     const initialCursor = await page.evaluate(() => window.connectionStreams.at(-1));
     await page.evaluate(() => { window.dropConnectionBytes = true; });
+    await page.clock.runFor(100);
     await post(`/api/sessions/${first.id}/messages`, { text: 'missed-while-stalled' });
     await page.clock.fastForward(45_001);
     await page.getByText('连接暂时中断，正在重新连接…', { exact: true }).waitFor();

@@ -1,4 +1,5 @@
 import { api, consoleStore as store, requestKey } from "./store";
+import { invalidateMcpInventory } from "./integrations-data";
 
 export type Obj = Record<string, any>;
 export const json = (value: unknown) => JSON.stringify(value, null, 2);
@@ -8,7 +9,14 @@ export async function native<T = Obj>(
   key = requestKey(),
   sessionId?: string,
 ): Promise<T> {
+  if (["config/mcpServer/reload", "config/value/write", "config/batchWrite", "plugin/install", "plugin/uninstall", "plugin/reconcile"].includes(method))
+    invalidateMcpInventory(native);
   return api<T>("/api/native/call", { method, params, ...(sessionId ? { session_id: sessionId } : {}) }, key);
+}
+if (typeof window !== "undefined") {
+  const invalidate = () => invalidateMcpInventory(native);
+  window.addEventListener("codex-integrations-changed", invalidate);
+  window.addEventListener("codex-mcp-inventory-changed", invalidate);
 }
 export const sandboxPolicy = (value: string) =>
   value === "workspace-write"

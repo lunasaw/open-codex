@@ -192,7 +192,7 @@ function McpRow({ server, threadId, run, busy, refresh }: {
 
 export function McpPanel({ state, scope = "global" }: { state: ConsoleState; scope?: "global" | "thread" }) {
   const threadId = scope === "thread" ? state.sessions.find((session) => session.id === state.active)?.thread_id : undefined;
-  const load = useCallback(() => client.mcps(threadId), [threadId, state.active]);
+  const load = useCallback(() => client.mcps(threadId, true), [threadId, state.active]);
   const inventory = useInventory(load, true);
   const action = useAction();
   const [search, setSearch] = useState("");

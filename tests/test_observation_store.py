@@ -66,6 +66,44 @@ class ObservationStoreContract(unittest.IsolatedAsyncioTestCase):
         page['events'][0]['payload']['text'] = 'also mutated'
         self.assertEqual((await self.store.read_events(EventQuery()))['events'][0]['payload']['text'], '正文')
 
+    async def test_conversation_stream_omits_inventory_but_raw_history_keeps_it_and_advances_cursor(self):
+        inventory = {**event(1), 'kind': 'response', 'method': 'mcpServerStatus/list'}
+        message = {**event(2), 'kind': 'notification', 'method': 'item/agentMessage/delta'}
+        last = {**event(3), 'kind': 'request', 'method': 'config/read'}
+        await self.put(inventory, message, last)
+        page = await self.store.read_events(EventQuery(session_id='s', conversation=True))
+        self.assertEqual([r['seq'] for r in page['events']], ['2'])
+        self.assertEqual(page['next_cursor'], 'epoch:3')
+        self.assertEqual(len((await self.store.read_events(EventQuery()))['events']), 3)
+
+    async def test_cached_projection_preserves_fixed_watermarks_binding_changes_and_result_isolation(self):
+        def change(seq, text):
+            return {'seq': str(seq), 'thread_id': 't', 'view': 'messages', 'key': 'm', 'set': {'text': text}}
+        binding = {'type': 'binding', 'seq': '1', 'session_id': 's', 'thread_id': 't'}
+        await self.put(event(1), changes=(binding, change(1, 'first')))
+        first = await self.store.snapshot(SnapshotQuery('s'))
+        first['messages'][0]['text'] = 'client mutation'
+        self.assertEqual((await self.store.snapshot(SnapshotQuery('s')))['messages'][0]['text'], 'first')
+        await self.put(event(2), batch_id='next', changes=(change(2, 'second'),))
+        self.assertEqual((await self.store.snapshot(SnapshotQuery('s')))['messages'][0]['text'], 'second')
+        self.assertEqual((await self.store.snapshot(SnapshotQuery('s', until='epoch:1')))['messages'][0]['text'], 'first')
+        self.assertEqual((await self.store.snapshot(SnapshotQuery('s')))['messages'][0]['text'], 'second')
+        rebind = {'type': 'binding', 'seq': '3', 'session_id': 'other', 'thread_id': 't'}
+        await self.put(event(3), batch_id='rebind', changes=(rebind,))
+        self.assertEqual((await self.store.snapshot(SnapshotQuery('s')))['messages'], [])
+        self.assertEqual((await self.store.snapshot(SnapshotQuery('other')))['messages'][0]['text'], 'second')
+
+    async def test_persisted_polling_steps_do_not_displace_content_in_snapshot_pages(self):
+        changes = ({'seq': '1', 'session_id': 's', 'view': 'steps', 'key': 'tool',
+                    'set': {'type': 'commandExecution', 'detail': {'output': 'kept'}}},) + tuple(
+            {'seq': str(n), 'session_id': 's', 'view': 'steps', 'key': f'poll-{n}',
+             'set': {'type': 'request', 'method': 'mcpServerStatus/list', 'interactive': False}}
+            for n in range(2, 252))
+        await self.put(*(event(n) for n in range(1, 252)), changes=changes)
+        page = await self.store.snapshot(SnapshotQuery('s', limit=1))
+        self.assertEqual([r['id'] for r in page['steps']], ['tool'])
+        self.assertIsNone(page['next_page'])
+
     async def test_filtered_empty_page_advances_and_fixed_watermark_excludes_new_events(self):
         await self.put(event(1), event(2, session='other'), event(3))
         page = await self.store.read_events(EventQuery(session_id='s', limit=1))

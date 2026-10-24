@@ -64,15 +64,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || '../frontend/node_
     };
     for (const dark of [false, true]) {
       await page.evaluate(dark => document.documentElement.classList.toggle('dark', dark), dark);
-      // Theme colors transition; compare the settled styles, not an intermediate frame.
-      await page.waitForFunction(() => {
-        const buttons = [...document.querySelectorAll('button')];
-        const history = buttons.find(button => button.textContent === '查询历史');
-        const live = buttons.find(button => button.textContent === '查看实时');
-        if (!history || !live) return false;
-        const first = getComputedStyle(history), second = getComputedStyle(live);
-        return ['backgroundColor', 'color', 'borderRadius', 'height'].every(key => first[key] === second[key]);
-      });
+      await page.waitForTimeout(250);
       assert.deepEqual(await history.evaluate(style), await live.evaluate(style));
       await shot(dark ? 'peer-buttons-dark' : 'peer-buttons-light');
     }

@@ -78,6 +78,18 @@ export type ReconcileResult = {
 };
 export type IntegrationRpc = <T>(method: string, params: Record<string, unknown> | null) => Promise<T>;
 
+// Shared by App bridges and catalog panels, scoped to the RPC identity/thread.
+// Authorization is still checked by the runtime/gateway on every tool call.
+const mcpInventories = new WeakMap<IntegrationRpc, Map<string, {
+  expires: number; value?: McpServer[]; pending?: Promise<McpServer[]>;
+}>>();
+export const MCP_INVENTORY_TTL_MS = 30_000;
+export function invalidateMcpInventory(rpc: IntegrationRpc, threadId?: string) {
+  const entries = mcpInventories.get(rpc);
+  if (threadId) entries?.delete(threadId);
+  else entries?.clear();
+}
+
 export function pluginTarget(marketplace: Marketplace, plugin: Plugin) {
   return {
     pluginName: plugin.name,
@@ -109,7 +121,28 @@ export class IntegrationsClient {
   setSkill(skill: Skill, enabled: boolean) {
     return this.rpc<{ effectiveEnabled: boolean }>("skills/config/write", { path: skill.path, enabled });
   }
-  async mcps(threadId?: string): Promise<McpServer[]> {
+  mcps(threadId?: string, fresh = false): Promise<McpServer[]> {
+    let entries = mcpInventories.get(this.rpc);
+    if (!entries) { entries = new Map(); mcpInventories.set(this.rpc, entries); }
+    const key = threadId || "";
+    const previous = entries.get(key);
+    if (previous?.pending) return previous.pending;
+    if (!fresh && previous?.value && previous.expires > Date.now()) return Promise.resolve(previous.value);
+    const entry: { expires: number; value?: McpServer[]; pending?: Promise<McpServer[]> } = { expires: 0 };
+    const pending = this.readMcps(threadId).then(value => {
+      entry.value = value; entry.expires = Date.now() + MCP_INVENTORY_TTL_MS;
+      return value;
+    }).catch(error => {
+      if (entries.get(key) === entry) entries.delete(key);
+      throw error;
+    }).finally(() => { entry.pending = undefined; });
+    entry.pending = pending;
+    entries.delete(key); entries.set(key, entry);
+    // Bound memory when visiting many threads; pending callers keep their promise.
+    if (entries.size > 64) entries.delete(entries.keys().next().value!);
+    return pending;
+  }
+  private async readMcps(threadId?: string): Promise<McpServer[]> {
     const rows = new Map<string, McpServer>();
     const cursors = new Set<string>();
     let cursor: string | undefined;
@@ -125,6 +158,7 @@ export class IntegrationsClient {
     return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
   reloadMcps() {
+    invalidateMcpInventory(this.rpc);
     return this.rpc("config/mcpServer/reload", null);
   }
   loginMcp(name: string, threadId?: string) {

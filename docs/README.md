@@ -20,5 +20,6 @@
 - [Skill、MCP 与插件管理](16-integrations.md)
 - [Web 能力对齐与验收](17-web-capability-parity.md)
 - [通用 MCP Apps Host](18-mcp-apps.md)
+- [会话性能优化与验证](25-session-performance.md)
 
 独立仓库开发、验证和 Galatea submodule 更新见 [仓库维护](23-repository-maintenance.md)。
