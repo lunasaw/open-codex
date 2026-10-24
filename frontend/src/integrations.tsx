@@ -2,6 +2,7 @@ import { allPages } from "./capability-controls";
 import { MarketplaceSettings, PluginShares, PluginSkill } from "./plugin-management";
 import { SkillRoots } from "./skill-roots";
 import { McpCapabilities } from "./mcp-capabilities";
+import { McpConfigForm } from "./mcp-config-form";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "./components/ui/button";
 import { native } from "./native";
@@ -141,9 +142,10 @@ const runtimeNames: Record<string, string> = {
   failed: "连接失败", cancelled: "已取消", disabled: "已禁用",
 };
 const authNames: Record<string, string> = { unknown: "认证状态未知", unsupported: "无需 OAuth", notLoggedIn: "未登录", oAuth: "OAuth 已登录", bearerToken: "Token 认证" };
-function McpRow({ server, threadId, run, busy, refresh }: {
+function McpRow({ server, threadId, run, busy, refresh, editable, onEdit }: {
   server: McpServer; threadId?: string; busy: boolean;
   run: (fn: () => Promise<void>) => Promise<void>; refresh: () => Promise<void>;
+  editable: boolean; onEdit: () => void;
 }) {
   const [authUrl, setAuthUrl] = useState<string>();
   const [copyStatus, setCopyStatus] = useState("");
@@ -176,6 +178,9 @@ function McpRow({ server, threadId, run, busy, refresh }: {
     {server.authStatus === "notLoggedIn" && <div className="native-options">
       <Button variant="outline" disabled={busy} onClick={login}>登录 {server.name}</Button>
     </div>}
+    {!threadId && <div className="native-options">
+      {server.pluginId ? <span className="integration-muted">插件拥有的传输配置由插件管理</span> : <Button variant="outline" disabled={!editable || busy} onClick={onEdit}>编辑配置</Button>}
+    </div>}
     {authUrl && <div className="integration-auth">
       <p>在浏览器中完成授权；若新窗口未打开，可使用以下链接。</p>
       <a href={authUrl} target="_blank" rel="noopener noreferrer">打开授权页面</a>
@@ -196,41 +201,28 @@ export function McpPanel({ state, scope = "global" }: { state: ConsoleState; sco
   const inventory = useInventory(load, true);
   const action = useAction();
   const [search, setSearch] = useState("");
-  const [name, setName] = useState("");
-  const [config, setConfig] = useState('{"command":"","args":[]}');
+  const [editorName, setEditorName] = useState<string | null>(null);
   const editable = !!state.nativeProtocol?.configuration_editable;
   const rows = inventory.data || [];
   return <div className="native-form integration-panel"><h3>MCP</h3>
-    <p className="integration-muted">MCP 连接外部工具与资源。连接状态每 5 秒更新。</p>
+    <p className="integration-muted">MCP 连接外部工具与资源。原生配置用于新会话，重载后可查看运行状态。</p>
     <div className="integration-toolbar">
       <Search label="搜索 MCP 服务" value={search} onChange={setSearch} />
       <Button variant="outline" disabled={inventory.loading || action.busy} onClick={() => void inventory.refresh()}>刷新列表</Button>
       {scope === "global" && <Button variant="outline" disabled={action.busy} onClick={() => void action.run(async () => {
         await client.reloadMcps(); action.setStatus("已请求重新加载 MCP 服务"); integrationsChanged();
       })}>重新加载全部</Button>}
+      {scope === "global" && <Button disabled={!editable || action.busy} onClick={() => setEditorName("")}>添加 MCP</Button>}
     </div>
     <p className="integration-muted">{rows.filter((row) => row.runtimeStatus === "connected").length}/{rows.length} 个服务已连接</p>
     <Feedback loading={inventory.loading} error={action.error || inventory.error} status={action.status} />
     {rows.filter((row) => row.name.toLowerCase().includes(search.toLowerCase())).map((server) =>
       <McpRow key={`${threadId || "global"}:${server.name}`} server={server} threadId={threadId}
-        run={action.run} busy={action.busy} refresh={inventory.refresh} />)}
+        run={action.run} busy={action.busy} refresh={inventory.refresh} editable={editable}
+        onEdit={() => setEditorName(server.name)} />)}
     {inventory.data && !rows.length && <p className="integration-empty">当前没有 MCP 服务，请添加服务配置。</p>}
-    {scope === "global" && <details><summary>添加或更新 MCP 服务</summary>
-      <ReadonlyNotice editable={editable} />
-      <label className="native-field">MCP 服务名称<input aria-label="MCP 服务名称" value={name} onChange={(e) => setName(e.target.value)} /></label>
-      <label className="native-field">服务配置<textarea aria-label="服务配置" value={config} onChange={(e) => setConfig(e.target.value)} /></label>
-      <p className="integration-muted">支持 stdio command/args 或远程 url；使用 env_vars 或 bearer_token_env_var 引用环境变量。</p>
-      <Button disabled={!editable || action.busy} onClick={() => void action.run(async () => {
-        if (!/^[\w-]+$/.test(name.trim())) throw new Error("服务名称请使用字母、数字、下划线或连字符");
-        const value = JSON.parse(config);
-        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("服务配置必须为 JSON 对象");
-        if (!(typeof value.command === "string" && value.command.trim()) && !(typeof value.url === "string" && httpUrl(value.url)))
-          throw new Error("请填写 command 或有效的 HTTP(S) url");
-        await native("config/value/write", { keyPath: `mcp_servers.${name.trim()}`, value, mergeStrategy: "replace" });
-        action.setStatus("配置已保存；正在重新加载 MCP 服务");
-        await client.reloadMcps(); integrationsChanged();
-      })}>保存并重新加载</Button>
-    </details>}
+    {scope === "global" && editorName !== null && <McpConfigForm key={editorName || "new"} state={state}
+      initialName={editorName} onClose={() => setEditorName(null)} onSaved={() => { setEditorName(null); integrationsChanged(); }} />}
   </div>;
 }
 
