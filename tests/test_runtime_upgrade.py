@@ -22,12 +22,17 @@ class RuntimeUpgradeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # Keep fixture binaries independent of distro-specific coreutils symlinks.
+        previous_binary = self.root / 'codex-previous'
+        current_binary = self.root / 'codex-current'
+        previous_binary.write_text('fixture runtime 0.154.0\n')
+        current_binary.write_text('fixture runtime 0.163.0\n')
         previous = json.loads((ROOT / 'config/agent.example.json').read_text())
-        previous['codex'].update(binary='/usr/bin/true', runtime_version='codex-cli 0.154.0')
+        previous['codex'].update(binary=str(previous_binary), runtime_version='codex-cli 0.154.0')
         self.previous = previous
         (self.root / 'agent.before-runtime-0.163.0.json').write_text(json.dumps(previous))
         current = copy.deepcopy(previous)
-        current['codex'].update(binary='/usr/bin/false', runtime_version=RUNTIME_VERSION)
+        current['codex'].update(binary=str(current_binary), runtime_version=RUNTIME_VERSION)
         self.config = AgentConfig.from_dict(current, self.root)
         self.store = AtomicJsonStore(self.config.state_dir)
         self.bindings = {'runtime_binary_sha256': 'new-binary', 'runtime_compatibility_sha256': 'new-protocol',
@@ -36,7 +41,7 @@ class RuntimeUpgradeTests(unittest.TestCase):
             'principal_digest': 'principal'}
         self.session = {'id': 's', 'thread_id': 'native-t', 'status': 'recovery_required',
             'active_turn_id': None, 'active_request_id': None, 'settings': {'approvalPolicy': 'on-request'},
-            **self.bindings, 'runtime_binary_sha256': file_sha256(Path('/usr/bin/true')),
+            **self.bindings, 'runtime_binary_sha256': file_sha256(previous_binary),
             'runtime_compatibility_sha256': digest({'protocol': file_sha256(ROOT / 'src/codex_agent/protocol/0.154.0.json'),
                                                   'catalog': self.config.catalog().digest}),
             'agent_config_sha256': digest(previous), 'effective_config_sha256': 'old-effective'}
