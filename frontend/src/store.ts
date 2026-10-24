@@ -2,6 +2,7 @@ import { nativeNotice, invalidatesNativeResources, type NativeNotice } from "./n
 import { exactSlashCommand, initPrompt } from "./slash-commands";
 import { visibleEfforts } from "./configuration-data";
 import { StreamConnection } from "./stream-connection";
+import { affectsConversation, affectsSessions, isBackgroundRead } from "./conversation-events";
 import type {
   Capabilities,
   EventPage,
@@ -42,6 +43,8 @@ declare global {
   };
 }
 const recoveryErrors: Record<string, string> = {
+  "network-error": "网络连接暂时中断，请检查连接后重试。草稿和已加载的聊天记录仍保留。",
+  "network-write-unknown": "网络连接中断，操作结果尚未确认。请先核对会话状态，再使用原请求重试，避免重复执行。",
   "session-extensions-changed": "技能或扩展已更新，此会话需要完成版本迁移后才能恢复。请联系服务维护人员处理，历史消息仍保留。",
   "session-binding-mismatch": "此会话的运行配置与当前服务不一致，需要核对并迁移后恢复。",
   "session-state-changed": "会话状态已变化，请刷新页面后重试。",
@@ -63,15 +66,24 @@ export class ApiError extends Error {
     super(recoveryErrors[code] || `${status} · ${code}`);
   }
 }
-export async function api<T>(
+const pendingReads = new Map<string, Promise<unknown>>();
+async function request<T>(
   path: string,
   body?: unknown,
   key?: string,
   signal?: AbortSignal,
 ): Promise<T> {
+  const read = body === undefined;
+  for (let attempt = 0; ; attempt++) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  const timeout = read ? setTimeout(() => controller.abort(), 20_000) : undefined;
+  try {
   const response = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
-    signal,
+    signal: controller.signal,
     headers:
       body === undefined
         ? {}
@@ -79,9 +91,38 @@ export async function api<T>(
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const data = await response.json();
+  if (read && [502, 503, 504].includes(response.status) && attempt < 2 &&
+      (!data.error || ["state-or-runtime-unavailable", "OBSERVATION_UNAVAILABLE", "runtime-unavailable"].includes(data.error)))
+    throw new TypeError("temporary gateway failure");
   if (!response.ok)
     throw new ApiError(data.error || "请求失败", response.status, data.retry_safe === true);
   return data;
+  } catch (error) {
+    if (signal?.aborted) throw new DOMException("aborted", "AbortError");
+    if (error instanceof ApiError) throw error;
+    if (!(error instanceof TypeError || error instanceof SyntaxError ||
+          (error instanceof DOMException && error.name === "AbortError"))) throw error;
+    if (!read || attempt >= 2) throw new ApiError(read ? "network-error" : "network-write-unknown", 0);
+    await new Promise<void>(resolve => {
+      const done = () => { clearTimeout(timer); signal?.removeEventListener("abort", done); resolve(); };
+      const timer = setTimeout(done, 250 * 2 ** attempt);
+      signal?.addEventListener("abort", done, { once: true });
+      if (signal?.aborted) done();
+    });
+  } finally {
+    clearTimeout(timeout); signal?.removeEventListener("abort", abort);
+  }
+  }
+}
+export function api<T>(path: string, body?: unknown, key?: string, signal?: AbortSignal): Promise<T> {
+  // Requests with an owner signal keep independent cancellation semantics.
+  if (body !== undefined || signal) return request<T>(path, body, key, signal);
+  let pending = pendingReads.get(path);
+  if (!pending) {
+    pending = request(path).finally(() => { pendingReads.delete(path); });
+    pendingReads.set(path, pending);
+  }
+  return pending as Promise<T>;
 }
 export const requestKey = () =>
   "web-" +
@@ -182,6 +223,10 @@ export class ConsoleStore {
   private historyPage: string | null = null;
   private historyDepth = 0;
   private paging = false;
+  private sessionsQueued = false;
+  private eventBuffer: NativeEvent[] = [];
+  private eventTimer?: ReturnType<typeof setTimeout>;
+  private readFailures = 0;
   private titleSequences = new Map<string, bigint>();
   private filter = { method: "", direction: "", kind: "" };
   private filterVersion = 0;
@@ -883,6 +928,10 @@ export class ConsoleStore {
     clearTimeout(this.timer);
     this.timer = undefined;
     this.refreshQueued = false;
+    this.refreshing = false;
+    this.sessionsQueued = false;
+    this.readFailures = 0;
+    clearTimeout(this.eventTimer); this.eventTimer = undefined; this.eventBuffer = [];
     const version = ++this.generation;
     const controller = new AbortController();
     this.controller = controller;
@@ -923,7 +972,11 @@ export class ConsoleStore {
       }).catch(report);
       void api<Session[]>("/api/sessions", undefined, undefined, controller.signal).then((sessions) => {
         if (version === this.generation) this.patch({ sessions, sessionRefreshing: false });
-      }).catch(report);
+      }).catch(error => {
+        report(error);
+        if (version === this.generation && error instanceof ApiError &&
+            (error.status === 0 || error.status >= 500)) this.schedule();
+      });
     }
     try {
       let cursor: string;
@@ -950,11 +1003,18 @@ export class ConsoleStore {
         cursor = data.watermark;
       }
       this.patch({ loading: false });
+      if (this.state.error === recoveryErrors["network-error"]) this.patch({ error: "" });
       void this.stream(id, global, cursor, version, controller);
     } catch (error) {
       if (version === this.generation) {
         this.patch({ loading: false });
         this.fail(error);
+        if (error instanceof ApiError && (error.status === 0 || error.status >= 500)) {
+          this.timer = setTimeout(() => {
+            this.timer = undefined;
+            if (version === this.generation) void this.select(id, global, { clearError: false });
+          }, 2000);
+        }
       }
     }
   }
@@ -1183,8 +1243,9 @@ export class ConsoleStore {
       if (this.state.active === id) this.schedule();
     }
   }
-  schedule() {
+  schedule(refreshSessions = true) {
     this.refreshQueued = true;
+    this.sessionsQueued ||= refreshSessions;
     if (
       this.timer ||
       this.refreshing ||
@@ -1193,15 +1254,18 @@ export class ConsoleStore {
     )
       return;
     const version = this.generation,
-      id = this.state.active;
+      id = this.state.active,
+      signal = this.controller?.signal;
     this.timer = setTimeout(async () => {
       this.timer = undefined;
       this.refreshing = true;
       this.refreshQueued = false;
+      const refreshSessions = this.sessionsQueued;
+      this.sessionsQueued = false;
       try {
         const [snapshot, sessions] = await Promise.all([
-          api<Snapshot>(`/api/sessions/${encodeURIComponent(id)}/snapshot`),
-          api<Session[]>("/api/sessions"),
+          api<Snapshot>(`/api/sessions/${encodeURIComponent(id)}/snapshot`, undefined, undefined, signal),
+          refreshSessions ? api<Session[]>("/api/sessions", undefined, undefined, signal) : Promise.resolve(this.state.sessions),
         ]);
         if (version !== this.generation) return;
         let current = snapshot;
@@ -1215,6 +1279,7 @@ export class ConsoleStore {
         ) {
           const older = await api<Snapshot>(
             `/api/sessions/${encodeURIComponent(id)}/snapshot?limit=200&view=all&page=${encodeURIComponent(current.next_page)}`,
+            undefined, undefined, signal,
           );
           current = mergeSnapshots(older, current);
         }
@@ -1225,16 +1290,27 @@ export class ConsoleStore {
             sessions,
             snapshot: current,
             older: !!current.next_page,
+            ...(refreshSessions ? { sessionRefreshing: false } : {}),
+            ...(this.state.error === recoveryErrors["network-error"] ? { error: "" } : {}),
+            ...(this.state.streamError === "聊天记录暂时无法更新，正在重试…" ? { streamError: "" } : {}),
           });
         } else this.patch({ sessions });
         this.remember(current, id);
+        this.readFailures = 0;
       } catch (error) {
-        if (version === this.generation) this.fail(error);
+        if (version === this.generation) {
+          if (error instanceof ApiError && (error.status === 0 || error.status >= 500)) {
+            this.readFailures++; this.refreshQueued = true; this.sessionsQueued ||= refreshSessions;
+            this.patch({ streamError: "聊天记录暂时无法更新，正在重试…" });
+          } else this.fail(error);
+        }
       } finally {
-        this.refreshing = false;
-        if (this.refreshQueued) this.schedule();
+        if (version === this.generation) {
+          this.refreshing = false;
+          if (this.refreshQueued) this.schedule(false);
+        }
       }
-    }, 75);
+    }, Math.min(10_000, 250 * 2 ** Math.min(this.readFailures, 6)));
   }
   private async stream(
     id: string | null,
@@ -1253,7 +1329,7 @@ export class ConsoleStore {
               ? "/api/events/stream"
               : `/api/sessions/${encodeURIComponent(id!)}/events`;
             const response = await fetch(
-              `${path}?after=${encodeURIComponent(cursor)}`,
+              `${path}?after=${encodeURIComponent(cursor)}${global ? "" : "&view=conversation"}`,
               { signal },
             );
             if (signal.aborted || version !== this.generation) return;
@@ -1271,17 +1347,25 @@ export class ConsoleStore {
                 ConsoleTransport.compareCursor(data.event_id, cursor) > 0
               ) {
                 if (
-                  this.state.eventLive &&
+                  this.state.eventLive && (global || !isBackgroundRead(data)) &&
                   (!global || !data.session_id) &&
                   Object.entries(this.filter).every(
                     ([key, value]) => !value || data[key] === value,
                   )
                 ) {
-                  this.patch({ events: [...this.state.events, data].slice(-200) });
+                  this.eventBuffer.push(data);
+                  if (!this.eventTimer) this.eventTimer = setTimeout(() => {
+                    this.eventTimer = undefined;
+                    const events = this.eventBuffer; this.eventBuffer = [];
+                    if (version === this.generation && this.state.eventLive)
+                      this.patch({ events: [...this.state.events, ...events].slice(-200) });
+                  }, 250);
                 }
                 const notice = nativeNotice(data);
                 if (notice && !this.state.nativeNotices.some((n) => n.id === notice.id)) this.patch({ nativeNotices: [...this.state.nativeNotices, notice].slice(-30) });
                 if (invalidatesNativeResources(data)) {
+                  if (["mcpServer/oauthLogin/completed", "mcpServer/startupStatus/updated", "thread/settings/updated"].includes(data.method) && typeof window !== "undefined")
+                    window.dispatchEvent(new Event("codex-mcp-inventory-changed"));
                   if (typeof window !== "undefined") window.dispatchEvent(new Event("codex-native-resources-changed"));
                   if (["project/changed", "thread/project/updated"].includes(data.method)) void this.refreshProjects().catch(this.fail);
                   if (["account/updated", "account/login/completed"].includes(data.method)) void this.refreshRuntimeDefaults().catch(this.fail);
@@ -1289,7 +1373,7 @@ export class ConsoleStore {
                 cursor = data.event_id;
                 if (data.method === "thread/queue/changed")
                   this.patch({ queueRevision: this.state.queueRevision + 1 });
-                this.schedule();
+                if (affectsConversation(data)) this.schedule(affectsSessions(data));
               } else if (
                 frame.event === "cursor" &&
                 ConsoleTransport.compareCursor(data.cursor, cursor) >= 0
@@ -1299,7 +1383,9 @@ export class ConsoleStore {
                 const revision = global ? this.state.eventPage?.history_revision : this.state.snapshot?.history_revision;
                 if (revision !== undefined && data.history_revision !== undefined && revision !== data.history_revision)
                   throw new ApiError("SNAPSHOT_REQUIRED", 409);
-                if (this.state.health) this.patch({ health: { ...this.state.health, observation: data } });
+                if (this.state.health && (this.state.health.observation.status !== data.status ||
+                  this.state.health.observation.history_revision !== data.history_revision))
+                  this.patch({ health: { ...this.state.health, observation: data } });
               }
             }, activity);
           });
@@ -1346,6 +1432,7 @@ export class ConsoleStore {
       }
       const data = await api<Snapshot>(
         path + "&page=" + encodeURIComponent(page),
+        undefined, undefined, this.controller?.signal,
       );
       if (version !== this.generation) return;
       this.historyPage = data.next_page;
@@ -1417,6 +1504,7 @@ export class ConsoleStore {
     this.initController?.abort();
     this.controller?.abort();
     clearTimeout(this.timer);
+    clearTimeout(this.eventTimer); this.eventBuffer = [];
   }
 }
 export function mergeSnapshots(older: Snapshot, current: Snapshot): Snapshot {

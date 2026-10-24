@@ -46,6 +46,10 @@ const { chromium } = require('../frontend/node_modules/playwright');
     const listed = await frame.evaluate(() => rpc('tools/list'));
     assert.ok(listed.tools.some(t => t.name === 'lookup'));
     assert.ok(!listed.tools.some(t => t.name === 'model_only'));
+    const inventoryBefore = calls.filter(c => c.method === 'mcpServerStatus/list').length;
+    await frame.evaluate(() => Promise.all(Array.from({ length: 20 }, () => rpc('tools/list'))));
+    assert.ok(calls.filter(c => c.method === 'mcpServerStatus/list').length - inventoryBefore <= 1,
+      'concurrent App inventory reads must share one cached request');
     const forbidden = await frame.evaluate(() => rpc('tools/call', {name: 'model_only'}).then(() => '', e => e.message));
     assert.match(forbidden, /不能调用/);
     assert.equal(calls.filter(c => c.method === 'mcpServer/tool/call' && c.params.tool === 'model_only').length, 0);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { IntegrationsClient, canInstall, httpUrl, pluginTarget, type IntegrationRpc, type Plugin } from "./integrations-data";
+import { IntegrationsClient, invalidateMcpInventory, canInstall, httpUrl, pluginTarget, type IntegrationRpc, type Plugin } from "./integrations-data";
 
 function fixture(reply: (method: string, params: any) => unknown) {
   const calls: Array<{ method: string; params: any }> = [];
@@ -28,6 +28,39 @@ test("MCP inventory rejects repeated cursors instead of looping", async () => {
   const { client, calls } = fixture(() => ({ data: [], nextCursor: "repeat" }));
   await assert.rejects(client.mcps(), /重复分页游标/);
   assert.equal(calls.length, 2);
+});
+
+test("App inventories coalesce across clients, isolate threads and invalidate without resurrecting old requests", async () => {
+  let count = 0;
+  let finish!: (value: any) => void;
+  const rpc: IntegrationRpc = async <T>() => { count++; return await new Promise(done => { finish = done; }) as T; };
+  const a = new IntegrationsClient(rpc), b = new IntegrationsClient(rpc);
+  const first = a.mcps("a"), duplicate = b.mcps("a");
+  assert.equal(count, 1);
+  finish({ data: [{ name: "old" }], nextCursor: null });
+  assert.equal(await first, await duplicate);
+  assert.equal((await b.mcps("a"))[0].name, "old");
+  assert.equal(count, 1);
+  const other = b.mcps("b"); assert.equal(count, 2);
+  finish({ data: [{ name: "other" }], nextCursor: null }); await other;
+  const refresh = a.mcps("a", true); assert.equal(count, 3);
+  const oldFinish = finish;
+  invalidateMcpInventory(rpc, "a");
+  const current = b.mcps("a"); assert.equal(count, 4);
+  finish({ data: [{ name: "new" }], nextCursor: null }); await current;
+  oldFinish({ data: [{ name: "stale" }], nextCursor: null }); await refresh;
+  assert.equal((await a.mcps("a"))[0].name, "new");
+});
+
+test("MCP inventory failures are not cached", async () => {
+  let calls = 0;
+  const client = new IntegrationsClient(async <T>() => {
+    if (++calls === 1) throw Error("offline");
+    return { data: [], nextCursor: null } as T;
+  });
+  await assert.rejects(client.mcps("t"), /offline/);
+  assert.deepEqual(await client.mcps("t"), []);
+  assert.equal(calls, 2);
 });
 
 test("MCP reload preserves protocol null; OAuth includes thread context", async () => {

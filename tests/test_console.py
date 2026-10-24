@@ -167,6 +167,30 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         private = await call(self.app, 'GET', '/api/sessions', headers={'accept-encoding': 'gzip'})
         self.assertIn((b'cache-control', b'no-store'), private[0]['headers'])
 
+    async def test_large_json_compression_preserves_private_responses_and_negotiation(self):
+        self.host.events.append('s', {'kind': 'message_accepted', 'host_request_id': 'large',
+                                      'public': {'text': 'large chat response ' * 3000}})
+        await self.host.events.flush()
+        path = '/api/sessions/s/snapshot'
+        original = await call(self.app, 'GET', path)
+        encoded = await call(self.app, 'GET', path, headers={'accept-encoding': 'gzip'})
+        headers = dict(encoded[0]['headers'])
+        body = b''.join(m.get('body', b'') for m in encoded)
+        self.assertEqual(headers[b'content-encoding'], b'gzip')
+        self.assertEqual(headers[b'cache-control'], b'no-store')
+        self.assertEqual(headers[b'vary'], b'Accept-Encoding')
+        self.assertEqual(int(headers[b'content-length']), len(body))
+        self.assertEqual(json.loads(gzip.decompress(body)), payload(original))
+        self.assertLess(len(body), len(json.dumps(payload(original))) / 5)
+        disabled = await call(self.app, 'GET', path, headers={'accept-encoding': 'gzip;q=0, *;q=1'})
+        self.assertNotIn(b'content-encoding', dict(disabled[0]['headers']))
+        small = await call(self.app, 'GET', '/health/live', headers={'accept-encoding': 'gzip'})
+        self.assertNotIn(b'content-encoding', dict(small[0]['headers']))
+        stream = await call(self.app, 'GET', '/api/sessions/s/events', headers={'accept-encoding': 'gzip'})
+        self.assertEqual(dict(stream[0]['headers'])[b'content-type'], b'text/event-stream')
+        self.assertNotIn(b'content-encoding', dict(stream[0]['headers']))
+        self.assertTrue(any(b'event: observation' in message.get('body', b'') for message in stream))
+
     async def test_static_revalidation_handles_updates_and_head(self):
         directory = Path(self.tmp.name) / 'public'
         directory.mkdir()

@@ -2,6 +2,7 @@
 import json
 import re
 from urllib.parse import urlsplit, parse_qs
+from .background_reads import BACKGROUND_READS
 
 SECRET = re.compile(r'password|secret|api.?key|authorization|cookie|credential|private.?key|encrypted|[_-]token$|^(?:(?:access|refresh|id|auth|session|bearer|oauth)[_-]?)?token$', re.I)
 PRIVATE = {'systeminstructions', 'developerinstructions', 'baseinstructions', 'instructions',
@@ -218,7 +219,8 @@ class Projector:
                     'status': params.get('review', {}).get('status', 'unknown')})
         if method in {'item/commandExecution/outputDelta', 'item/fileChange/outputDelta'} and item_id:
             change('steps', f'item:{thread}:{turn}:{item_id}', {**common}, {'text': params.get('delta', '')})
-        if kind == 'request' and method != 'item/tool/call':
+        if (kind == 'request' and method != 'item/tool/call'
+                and not (event.get('direction') == 'host_to_runtime' and method in BACKGROUND_READS)):
             change('steps', 'request:' + event['event_id'], {**common, 'type': 'request', 'method': method,
                    'detail': payload, 'interactive': event.get('direction') == 'runtime_to_host'})
         return output

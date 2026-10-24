@@ -17,6 +17,7 @@ class EventQuery:
     until: str | None = None
     limit: int = 200
     filters: dict = field(default_factory=dict)
+    conversation: bool = False
 
 
 @dataclass(frozen=True)

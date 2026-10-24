@@ -341,6 +341,9 @@ class AgentHost:
 
     async def handle_notification(self, message):
         method, params = message.get('method'), message.get('params', {})
+        if method in {'mcpServer/startupStatus/updated', 'mcpServer/oauthLogin/completed',
+                      'thread/settings/updated', 'thread/closed'}:
+            self.native.invalidate_mcp_inventory()
         if method == 'account/gatewayOAuth/changed':
             self.native.gateway_changed(params)
             return

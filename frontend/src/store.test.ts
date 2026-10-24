@@ -1,6 +1,6 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { ApiError, ConsoleStore } from "./store.ts";
+import { api, ApiError, ConsoleStore } from "./store.ts";
 import { parseProjectLayout, moveProject } from "./project-state.ts";
 import type { Snapshot } from "./types.ts";
 import { toConversationMessages } from "./messages.ts";
@@ -46,6 +46,65 @@ const pendingStream = (init?: RequestInit) => new Promise<Response>((_, reject) 
 test("recovery errors explain the cause and retain unknown server diagnostics", () => {
   assert.match(new ApiError("session-extensions-changed", 409).message, /扩展已更新.*迁移/);
   assert.equal(new ApiError("unexpected-failure", 503).message, "503 · unexpected-failure");
+});
+
+test("read failures retry and concurrent readers share recovery; writes keep unknown outcomes", async () => {
+  let count = 0;
+  globalThis.fetch = async () => {
+    if (++count === 1) throw new TypeError("Failed to fetch");
+    return json({ ok: true });
+  };
+  const first = api("/read-recovery"), second = api("/read-recovery");
+  assert.equal(first, second);
+  assert.deepEqual(await first, { ok: true });
+  assert.equal(count, 2);
+  globalThis.fetch = async () => { count++; throw new TypeError("Failed to fetch"); };
+  await assert.rejects(api("/write", { text: "once" }, "same-key"), /操作结果尚未确认/);
+  assert.equal(count, 3, "mutation requests must never be automatically replayed");
+});
+
+test("switching chats aborts an in-flight history refresh and immediately loads the new chat", async () => {
+  const s = make();
+  let oldSignal: AbortSignal | undefined;
+  globalThis.fetch = async (path, init) => {
+    const url = String(path);
+    if (url.endsWith("/a/snapshot") && s.state.snapshot) {
+      oldSignal = init?.signal || undefined; return pendingStream(init);
+    }
+    if (url.endsWith("/snapshot")) return json(snapshot(url.includes("/b/") ? "b" : "a"));
+    return pendingStream(init);
+  };
+  await s.select("a", false, { refreshMetadata: false });
+  s.schedule(false);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.ok(oldSignal);
+  await s.select("b", false, { refreshMetadata: false });
+  assert.equal(oldSignal.aborted, true);
+  assert.equal(s.state.snapshot?.messages?.[0].text, "b");
+  assert.equal(s.state.error, "");
+});
+
+test("a failed session metadata read recovers without leaving composition disabled", async () => {
+  const s = make();
+  let sessions = 0;
+  globalThis.fetch = async (path, init) => {
+    if (String(path) === "/api/sessions") {
+      if (++sessions <= 3) throw new TypeError("Failed to fetch");
+      return json([{ id: "a", status: "ready" }]);
+    }
+    if (String(path).endsWith("/snapshot")) return json(snapshot("a"));
+    if (String(path).endsWith("/status")) return json({ epoch: "e", host_ready: true });
+    return pendingStream(init);
+  };
+  await s.select("a");
+  assert.equal(s.state.sessionRefreshing, true);
+  const deadline = Date.now() + 2500;
+  while (s.state.sessionRefreshing && Date.now() < deadline)
+    await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(s.state.sessionRefreshing, false);
+  assert.equal(s.state.error, "");
+  assert.equal(s.state.sessions[0].status, "ready");
+  assert.equal(sessions, 4);
 });
 
 test("resume rejects duplicate clicks and allows a new request after a safe rejection", async () => {

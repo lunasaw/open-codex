@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ import uuid
 from .models import EventQuery, SnapshotQuery
 from .ports import ObservationError, InvalidCursor, UnknownEvent, UnknownSession
 from .service import CAPABILITIES
-from .static_files import CSP, StaticFiles
+from .static_files import CSP, StaticFiles, accepts_gzip
 from .html_preview import PREVIEW_CSP, read_html_preview
 
 from ..host import HostNotReady, ResumeRejected
@@ -108,7 +109,8 @@ class ConsoleApp:
             if filters['unbound'] not in {'true', 'false'}:
                 raise InvalidCursor('invalid unbound filter')
             filters['unbound'] = filters['unbound'] == 'true'
-        return EventQuery(session_id, after, query.get('until'), limit, filters), query
+        return EventQuery(session_id, after, query.get('until'), limit, filters,
+                          conversation=query.get('view') == 'conversation'), query
 
     async def _stream(self, query, receive, send):
         if self._streams >= self.max_streams:
@@ -257,6 +259,34 @@ class ConsoleApp:
             return result
 
     async def __call__(self, scope, receive, send):
+        # Compress finite JSON only. SSE remains incremental and unbuffered.
+        headers = dict(scope.get('headers', []))
+        if scope.get('type') != 'http' or not accepts_gzip(headers.get(b'accept-encoding', b'').decode('latin1')):
+            return await self._dispatch(scope, receive, send)
+        start = None
+        async def compressed_send(message):
+            nonlocal start
+            if message['type'] == 'http.response.start':
+                response_headers = dict(message.get('headers', []))
+                if (response_headers.get(b'content-type', b'').startswith(b'application/json')
+                        and b'content-encoding' not in response_headers):
+                    start = message
+                    return
+            if start is not None:
+                body = message.get('body', b'')
+                if not message.get('more_body') and len(body) >= 4096:
+                    body = await asyncio.to_thread(gzip.compress, body, compresslevel=3, mtime=0)
+                    start = {**start, 'headers': [(k, v) for k, v in start['headers']
+                        if k.lower() not in {b'content-length', b'content-encoding', b'vary'}] + [
+                            (b'content-encoding', b'gzip'), (b'vary', b'Accept-Encoding'),
+                            (b'content-length', str(len(body)).encode())]}
+                    message = {**message, 'body': body}
+                await send(start)
+                start = None
+            await send(message)
+        return await self._dispatch(scope, receive, compressed_send)
+
+    async def _dispatch(self, scope, receive, send):
         if scope.get('type') == 'lifespan':
             return await self._lifespan(receive, send)
         if scope.get('type') != 'http':

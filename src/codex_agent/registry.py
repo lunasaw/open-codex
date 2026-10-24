@@ -117,7 +117,8 @@ class ToolRegistry:
                 envelope = value.envelope() if isinstance(value, ToolResult) else ToolResult(True, data=value, request_id=self.journal.get(context.call_id)["request_id"]).envelope()
                 envelope = redact_result(envelope)
                 if len(json.dumps(envelope, ensure_ascii=False, allow_nan=False).encode()) > self.max_response_bytes:
-                    envelope = self._error(request_id, "response-too-large", "reduce-page-size-and-reconcile", state_changed="unknown")
+                    envelope = self._error(request_id, "response-too-large", "reduce-page-size-and-reconcile",
+                                           state_changed=False if identity["read_only"] else "unknown")
                 state = "unknown" if envelope.get("error", {}).get("state_changed") == "unknown" else "receipt_saved"
                 self.journal.transition(context.call_id, state, receipt=envelope)
                 return envelope
@@ -129,6 +130,16 @@ class ToolRegistry:
         with self._lock:
             for record in self.journal.records():
                 if record['state'] == 'receipt_saved':
+                    continue
+                receipt = record.get('receipt')
+                if (record['identity'].get('read_only') is True and isinstance(receipt, dict)
+                        and receipt.get('ok') is False
+                        and isinstance(receipt.get('error'), dict)
+                        and receipt['error'].get('category') == 'response-too-large'):
+                    # Preserve the known read failure without replaying the call.
+                    receipt = {**receipt, 'error': {**receipt['error'], 'state_changed': False}}
+                    self.journal.transition(record['call_id'], 'receipt_saved', receipt=receipt,
+                                            recovered_by='read-only-response-error')
                     continue
                 try:
                     data = observe(record['identity'])

@@ -14,6 +14,12 @@ import tailwindcss from "@tailwindcss/postcss";
 const sourceStatic = "../src/codex_agent/console/static";
 const out = process.env.CONSOLE_BUILD_DIR || sourceStatic;
 await mkdir(out, { recursive: true });
+const previousAssetsFile = path.join(out, "previous-assets.json");
+let previousAssets = [];
+try { previousAssets = JSON.parse(await readFile(previousAssetsFile, "utf8")); }
+catch {
+  try { previousAssets = await readdir(path.join(out, "assets")); } catch { /* first build */ }
+}
 const css = await postcss([tailwindcss({ optimize: true })]).process(
   await readFile("src/style.css", "utf8"),
   { from: path.resolve("src/style.css") },
@@ -220,7 +226,8 @@ for (const [filename, mime] of [
 await writeFile(`${out}/index.html`, html);
 await copyFile("src/audio-capture-worklet.js", `${out}/audio-capture-worklet.js`);
 await writeFile(`${out}/build-meta.json`, JSON.stringify(result.metafile));
-// Remove superseded bundles only after the current build has been written.
+// Retain the previous build's chunks: an already-open tab may lazy-load them
+// after deployment. Deleting them produces a failed fetch until the tab reloads.
 const assetsDirectory = path.resolve(out, "assets");
 const currentAssets = new Set(
   Object.keys(result.metafile.outputs)
@@ -228,7 +235,9 @@ const currentAssets = new Set(
     .map((filename) => path.basename(filename)),
 );
 currentAssets.add(path.basename(transportUrl));
+const retainedAssets = new Set([...currentAssets, ...previousAssets]);
 for (const entry of await readdir(assetsDirectory, { withFileTypes: true })) {
-  if (entry.isFile() && !currentAssets.has(entry.name))
+  if (entry.isFile() && !retainedAssets.has(entry.name))
     await unlink(path.join(assetsDirectory, entry.name));
 }
+await writeFile(previousAssetsFile, JSON.stringify([...currentAssets]));

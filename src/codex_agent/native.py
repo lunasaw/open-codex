@@ -10,6 +10,7 @@ import copy
 import json
 import time
 import uuid
+from collections import OrderedDict
 
 from jsonschema import Draft7Validator
 
@@ -58,6 +59,42 @@ class NativeBridge:
         self.pending = {}
         self.completed = {}
         self.auth_handoffs = {}
+        self._mcp_inventory = OrderedDict()
+        self._mcp_pending = {}
+
+    def invalidate_mcp_inventory(self):
+        self._mcp_inventory.clear()
+        # In-flight callers keep their task; its result cannot refill this cache.
+        self._mcp_pending.clear()
+
+    async def _request(self, method, params, *, timeout):
+        if method != 'mcpServerStatus/list':
+            return await self.host.client.peer.request(method, params, timeout=timeout)
+        key = (id(self.host.client.peer), json.dumps(params, sort_keys=True))
+        cached = self._mcp_inventory.get(key)
+        if cached and cached[0] > time.monotonic():
+            self._mcp_inventory.move_to_end(key)
+            return copy.deepcopy(cached[1])
+        task = self._mcp_pending.get(key)
+        if task is None:
+            async def load():
+                try:
+                    value = await self.host.client.peer.request(method, params, timeout=timeout)
+                    if self._mcp_pending.get(key) is asyncio.current_task():
+                        self._mcp_inventory[key] = (time.monotonic() + 3, copy.deepcopy(value))
+                        self._mcp_inventory.move_to_end(key)
+                        if len(self._mcp_inventory) > 64:
+                            self._mcp_inventory.popitem(last=False)
+                    return value
+                finally:
+                    if self._mcp_pending.get(key) is asyncio.current_task():
+                        self._mcp_pending.pop(key, None)
+            task = asyncio.create_task(load())
+            # A disconnected browser may be the sole waiter. Retrieve a later
+            # failure even then, while leaving it visible to other waiters.
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            self._mcp_pending[key] = task
+        return copy.deepcopy(await asyncio.shield(task))
 
     def gateway_changed(self, params):
         provider = params.get('providerId')
@@ -170,6 +207,9 @@ class NativeBridge:
             changes_config = True
         else:
             changes_config = False
+        if changes_config or method in {'config/mcpServer/reload', 'mcpServer/oauth/login',
+                                         'thread/settings/update', 'thread/archive', 'thread/delete'}:
+            self.invalidate_mcp_inventory()
         thread_id = (params or {}).get('threadId')
         session = host._session_for_thread(thread_id)
         if method == 'turn/settings/update' and (
@@ -230,7 +270,7 @@ class NativeBridge:
                     'command/exec', 'mcpServer/tool/call', 'account/login/start', 'mcpServer/oauth/login'} else 60
                 if method == 'command/exec' and params.get('tty') and params.get('disableTimeout'):
                     timeout = float('inf')
-                result = await host.client.peer.request(method, params, timeout=timeout)
+                result = await self._request(method, params, timeout=timeout)
         except BaseException as error:
             if starts_turn:
                 # A definite native rejection consumed no turn; uncertain transport

@@ -9,9 +9,11 @@ import hmac
 import json
 import re
 import secrets
+from collections import OrderedDict
 
 from ..models import EventQuery, ObservationBatch, SnapshotQuery
 from ..app_presentation import presents_app
+from ..background_reads import BACKGROUND_READS, background_step
 from ..ports import (CommitConflict, CursorAhead, EpochMismatch, InvalidCursor,
                      PageContextMismatch, SequenceGap, StoreUnavailable)
 
@@ -32,6 +34,7 @@ class MemoryConsoleObservationStore:
         self._bytes = 0
         self._condition = asyncio.Condition()
         self._page_key = secrets.token_bytes(32)
+        self._view_cache = OrderedDict()
 
     async def open(self, epoch):
         if self.epoch is not None or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', epoch):
@@ -147,6 +150,9 @@ class MemoryConsoleObservationStore:
             if any((session if key == 'session_id' else (session is None) if key == 'unbound' else row.get(key)) != value
                    for key, value in query.filters.items()):
                 continue
+            if (query.conversation and row.get('kind') in {'request', 'response'}
+                    and row.get('method') in BACKGROUND_READS):
+                continue
             row = copy.deepcopy(row)
             if session and not row.get('session_id'):
                 row.update(session_id=session, correlation='bound')
@@ -189,11 +195,18 @@ class MemoryConsoleObservationStore:
             until = self._seq(page['until'], 0)
             before = page['before']
         bindings, version = self._binding(until)
-        views = {name: {} for name in ('messages', 'turns', 'steps')}
-        for replay_order, change in enumerate(self._changes):
+        cached = self._view_cache.get(query.session_id)
+        if cached and cached['until'] <= until and cached['binding'] == version:
+            views, start = cached['views'], cached['offset']
+        else:
+            views, start = {name: {} for name in ('messages', 'turns', 'steps')}, 0
+        offset = start
+        for replay_order in range(start, len(self._changes)):
+            change = self._changes[replay_order]
             seq = int(change['seq'])
             if seq > until:
                 break
+            offset = replay_order + 1
             if change.get('type') == 'binding' or self._session(change, bindings) != query.session_id:
                 continue
             view = views[change['view']]
@@ -206,11 +219,22 @@ class MemoryConsoleObservationStore:
             if change.get('remove'):
                 view.pop(key, None)
                 continue
+            # Exclude old persisted polling rows too, without rewriting raw
+            # diagnostics or any native thread/turn/tool records.
+            if change['view'] == 'steps' and background_step(change.get('set', {})):
+                continue
             row = view.setdefault(key, {'id': key, 'first_seq': str(seq), 'replay_order': replay_order})
             row.update(copy.deepcopy(change.get('set', {})))
             for field, text in change.get('append', {}).items():
                 row[field] = row.get(field, '') + text
             row['last_seq'] = str(seq)
+        if not cached or until >= cached['until']:
+            self._view_cache[query.session_id] = {
+                'until': until, 'binding': version, 'offset': offset, 'views': views,
+            }
+            self._view_cache.move_to_end(query.session_id)
+            if len(self._view_cache) > 8:
+                self._view_cache.popitem(last=False)
         selected = views.keys() if query.view == 'all' else [query.view]
         output, next_before, more = {}, {}, False
         # A long-running App remains recoverable after its invocation leaves the
@@ -230,7 +254,7 @@ class MemoryConsoleObservationStore:
             next_before[name] = start
             more = more or start > 0
         token = self._token({'context': context, 'until': self._cursor(until), 'before': next_before}) if more else None
-        return {**output, 'epoch': self.epoch, 'watermark': self._cursor(until), 'next_page': token,
+        return {**copy.deepcopy(output), 'epoch': self.epoch, 'watermark': self._cursor(until), 'next_page': token,
                 'binding_version': version, 'history_revision': self.history_revision,
                 'history_start': self._cursor(1 if until else 0),
                 'coverage': {'status': 'complete', 'reason': None}}
@@ -273,6 +297,7 @@ class MemoryConsoleObservationStore:
             self._bytes = size
             # Old batch receipts must never reintroduce pruned payloads.
             self._batches.clear()
+            self._view_cache.clear()
             self.history_revision += 1
             self._condition.notify_all()
 
