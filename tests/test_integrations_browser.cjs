@@ -14,6 +14,20 @@ const { chromium } = require('../frontend/node_modules/playwright');
     // Exercise the authorization-link fallback when popups are blocked.
     await page.addInitScript(() => { window.open = () => null; });
     let enabled = false, installed = false, rejectInstall = true, rejectReload = false;
+    let configVersion = 0, conflictNextConfig = false;
+    const userMcp = { 'connected-service': { command: 'node', args: ['server.js'], cwd: '/fixture',
+      env: { API_TOKEN: '[redacted:credential]' }, env_vars: ['HOME'], tool_timeout_sec: 30 } };
+    const keySegments = (path) => {
+      const parts = []; let part = '', quoted = false, escaped = false;
+      for (const char of path) {
+        if (escaped) { part += char; escaped = false; }
+        else if (quoted && char === '\\') escaped = true;
+        else if (char === '"') quoted = !quoted;
+        else if (char === '.' && !quoted) { parts.push(part); part = ''; }
+        else part += char;
+      }
+      parts.push(part); return parts;
+    };
     const base = { enabled: true, installed: false, authPolicy: 'ON_USE', installPolicy: 'AVAILABLE' };
     const remotePlugin = () => ({ ...base, id: 'remote/analysis', name: 'analysis', installed, interface: {
       displayName: 'Analysis Tools', shortDescription: 'Skills and MCP together', capabilities: ['research'],
@@ -31,11 +45,36 @@ const { chromium } = require('../frontend/node_modules/playwright');
       else if (method === 'mcpServerStatus/list') result = params.cursor ? { data: [
         { name: 'failed-service', authStatus: 'unknown', runtimeStatus: 'failed', toolsError: 'Connection refused', tools: {} },
         { name: 'unknown-service', authStatus: 'unsupported', runtimeStatus: null, tools: {} },
-      ], nextCursor: null } : { data: [
+      ...(Object.hasOwn(userMcp, 'remote-service') ? [{ name: 'remote-service', authStatus: 'bearerToken', runtimeStatus: 'connected', tools: {} }] : [])], nextCursor: null } : { data: [
         { name: 'connected-service', authStatus: 'unsupported', runtimeStatus: 'connected', tools: { echo: { name: 'echo', description: 'Echo text' } }, resources: [{ name: 'Guide', uri: 'file:///guide' }] },
         { name: 'oauth-service', authStatus: 'notLoggedIn', runtimeStatus: 'authenticationRequired', tools: {} },
       ], nextCursor: 'second-page' };
       else if (method === 'mcpServer/oauth/login') result = { authorizationUrl: 'https://example.com/authorize?state=keep-me' };
+      else if (method === 'config/read') {
+        const config = { mcp_servers: structuredClone(userMcp) };
+        for (const server of Object.values(config.mcp_servers)) {
+          for (const [key, value] of Object.entries(server.env || {}))
+            if (/token|secret|password|api.?key/i.test(key)) server.env[key] = '[redacted:credential]';
+          if (server.http_headers?.Authorization) server.http_headers.Authorization = '[redacted:credential]';
+        }
+        result = { config, origins: {}, layers: [{ name: { type: 'user', file: '/fixture/config.toml' }, version: `v${configVersion}`, config }] };
+      } else if (method === 'config/batchWrite') {
+        if (params.expectedVersion !== `v${configVersion}`) return route.fulfill({ status: 409, json: { error: 'Configuration changed; read and retry.' } });
+        if (conflictNextConfig) { conflictNextConfig = false; configVersion++; return route.fulfill({ status: 409, json: { error: 'Configuration changed; read and retry.' } }); }
+        for (const edit of params.edits) {
+          const [root, name, ...tail] = keySegments(edit.keyPath);
+          assert.equal(root, 'mcp_servers');
+          if (!tail.length) {
+            if (edit.value === null) delete userMcp[name]; else userMcp[name] = edit.value;
+            continue;
+          }
+          userMcp[name] ||= {};
+          let parent = userMcp[name];
+          for (const key of tail.slice(0, -1)) parent = parent[key] ||= {};
+          if (edit.value === null) delete parent[tail.at(-1)]; else parent[tail.at(-1)] = edit.value;
+        }
+        configVersion++; result = { status: 'ok' };
+      }
       else if (method === 'config/mcpServer/reload') {
         assert.equal(params, null);
         if (rejectReload) return route.fulfill({ status: 422, json: { error: 'Reload rejected by runtime' } });
@@ -100,6 +139,48 @@ const { chromium } = require('../frontend/node_modules/playwright');
     await page.locator('[data-mcp=failed-service]').getByRole('alert').getByText('Connection refused').waitFor();
     await page.getByText('1/4 个服务已连接').waitFor();
     assert.equal(await page.getByText('工具与资源', { exact: true }).count(), 0);
+    const connectedMcp = page.locator('[data-mcp=connected-service]');
+    await connectedMcp.getByRole('button', { name: '编辑配置' }).click();
+    const editor = page.getByRole('region', { name: '编辑 MCP 服务 connected-service', exact: true });
+    await editor.getByLabel('启动命令').waitFor();
+    assert.equal(await editor.getByLabel('环境变量值 1').inputValue(), '');
+    await editor.getByLabel('启动命令').fill('node-updated');
+    conflictNextConfig = true;
+    await editor.getByRole('button', { name: '保存并重新加载', exact: true }).click();
+    await editor.getByRole('alert').filter({ hasText: 'Configuration changed' }).waitFor();
+    assert.equal(await editor.getByLabel('启动命令').inputValue(), 'node-updated', 'conflicts keep the draft until explicitly reloaded');
+    await editor.getByRole('button', { name: '放弃修改并重读配置', exact: true }).click();
+    await editor.getByLabel('启动命令').fill('node-updated');
+    await editor.getByRole('button', { name: '保存并重新加载', exact: true }).click();
+    await editor.waitFor({ state: 'hidden' });
+    const editCall = calls.findLast((call) => call.method === 'config/batchWrite');
+    assert.equal(editCall.params.expectedVersion, 'v1');
+    assert.equal(editCall.params.reloadUserConfig, true);
+    assert.ok(editCall.params.edits.some((edit) => edit.keyPath === 'mcp_servers.connected-service.command' && edit.value === 'node-updated'));
+    assert.equal(JSON.stringify(editCall.params).includes('[redacted:'), false, 'unchanged hidden variables are never sent back');
+    await page.getByRole('button', { name: '添加 MCP', exact: true }).click();
+    const newEditor = page.getByRole('region', { name: '添加 MCP 服务', exact: true });
+    await newEditor.getByLabel('MCP 服务名称').fill('remote-service');
+    await newEditor.getByRole('tab', { name: 'Streamable HTTP' }).click();
+    await newEditor.getByLabel('MCP 服务 URL').fill('http://127.0.0.1:18885/mcp');
+    await newEditor.getByLabel('认证方式').selectOption('token');
+    await newEditor.getByLabel('访问 Token').fill('fixture-inline-token');
+    assert.equal(await newEditor.getByLabel('访问 Token').getAttribute('type'), 'password');
+    await newEditor.getByRole('button', { name: '保存并重新加载', exact: true }).click();
+    await newEditor.waitFor({ state: 'hidden' });
+    const createCall = calls.findLast((call) => call.method === 'config/batchWrite');
+    assert.ok(createCall.params.edits.some((edit) => edit.keyPath === 'mcp_servers.remote-service.http_headers.Authorization' && edit.value === 'Bearer fixture-inline-token'));
+    const remoteCard = page.locator('[data-mcp=remote-service]');
+    await remoteCard.getByRole('button', { name: '编辑配置' }).waitFor();
+    await remoteCard.getByRole('button', { name: '编辑配置' }).click();
+    const remoteEditor = page.getByRole('region', { name: '编辑 MCP 服务 remote-service', exact: true });
+    await remoteEditor.getByLabel('访问 Token').waitFor();
+    assert.equal(await remoteEditor.getByLabel('访问 Token').inputValue(), '', 'native config reads keep saved tokens masked');
+    await remoteEditor.getByRole('button', { name: '删除', exact: true }).click();
+    await remoteEditor.getByRole('button', { name: '确认删除', exact: true }).click();
+    await remoteEditor.waitFor({ state: 'hidden' });
+    const deleteCall = calls.findLast((call) => call.method === 'config/batchWrite');
+    assert.deepEqual(deleteCall.params.edits, [{ keyPath: 'mcp_servers.remote-service', value: null, mergeStrategy: 'replace' }]);
     await page.getByRole('button', { name: '返回聊天', exact: true }).click();
     await page.locator('#text').fill('/mcp'); await page.locator('#text').press('Enter');
     await page.getByRole('option', { name: /^会话工具与资源/ }).click();

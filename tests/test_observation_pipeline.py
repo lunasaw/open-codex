@@ -12,6 +12,26 @@ from codex_agent.console.projection import redact
 
 
 class RedactionTests(unittest.TestCase):
+    def test_config_write_values_at_credential_paths_are_hidden(self):
+        params = {'edits': [
+            {'keyPath': 'mcp_servers."galatea.app".http_headers.Authorization', 'value': 'Bearer fixture-private-token', 'mergeStrategy': 'replace'},
+            {'keyPath': 'mcp_servers.local.env.API_TOKEN', 'value': 'fixture-api-secret', 'mergeStrategy': 'replace'},
+            {'keyPath': 'mcp_servers.local.env.DISPLAY_MODE', 'value': 'ordinary-env-value', 'mergeStrategy': 'replace'},
+            {'keyPath': 'mcp_servers.local.bearer_token_env_var', 'value': 'MCP_TOKEN', 'mergeStrategy': 'replace'},
+            {'keyPath': 'model_providers.local.env_http_headers.X-Internal', 'value': 'fixture-header-secret', 'mergeStrategy': 'replace'},
+        ]}
+        public, marks = redact(params, method='config/batchWrite')
+        encoded = json.dumps(public)
+        for secret in ('fixture-private-token', 'fixture-api-secret', 'fixture-header-secret'):
+            self.assertNotIn(secret, encoded)
+        self.assertIn('MCP_TOKEN', encoded)
+        self.assertNotIn('ordinary-env-value', encoded)
+        self.assertEqual(len(marks), 4)
+        direct = {'keyPath': 'mcp_servers.local.http_headers.Authorization', 'value': 'Bearer fixture-direct-token'}
+        public, marks = redact(direct, method='config/value/write')
+        self.assertNotIn('fixture-direct-token', json.dumps(public))
+        self.assertEqual(len(marks), 1)
+
     def test_config_sources_and_credential_storage_modes_are_public_but_secrets_are_not(self):
         origin = {'name': {'type': 'user', 'file': '/fixture/config.toml'}, 'version': 'v1'}
         config = {'cli_auth_credentials_store': 'file', 'mcp_oauth_credentials_store': 'keyring',

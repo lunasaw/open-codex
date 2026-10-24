@@ -15,6 +15,24 @@ PUBLIC_CREDENTIAL_STORE_MODES = {
 }
 
 
+def config_write_value_is_secret(item):
+    """Hide credential values submitted through leaf-oriented config writes."""
+    if not isinstance(item, dict) or 'value' not in item or not isinstance(item.get('keyPath'), str):
+        return False
+    path = item['keyPath']
+    # MCP headers can carry arbitrary bearer/API credentials even when their
+    # header name is not itself recognizable as secret.
+    if re.search(r'(?:^|[.\"])(?:env_)?http_headers(?:[.\"]|$)', path, re.I):
+        return True
+    parts = []
+    for piece in re.split(r'\.(?=(?:[^\"]|\"[^\"]*\")*$)', path):
+        parts.append(piece.strip('"'))
+    names = parts
+    if 'mcp_servers' in names and 'env' in names:
+        return True
+    return any(SECRET.search(name) for name in names)
+
+
 def redact(value, *, method=None):
     marks = []
     def omit(path, reason):
@@ -27,6 +45,8 @@ def redact(value, *, method=None):
                 pointer = path + '/' + key.replace('~', '~0').replace('/', '~1')
                 normalized = re.sub(r'[_-]', '', key).lower()
                 reason = None
+                if key == 'value' and method in {'config/value/write', 'config/batchWrite'} and config_write_value_is_secret(item):
+                    reason = 'credential'
                 # Config origin keys name settings; their values are source
                 # metadata, not those settings' contents. Still walk metadata
                 # recursively so any nested private fields remain protected.
@@ -38,7 +58,9 @@ def redact(value, *, method=None):
                               and key in PUBLIC_CREDENTIAL_STORE_MODES
                               and (child is None or isinstance(child, str)
                                    and child in PUBLIC_CREDENTIAL_STORE_MODES[key]))
-                if config_origin or store_mode:
+                if reason:
+                    pass
+                elif config_origin or store_mode:
                     pass
                 elif SECRET.search(key) or key == 'io.codex.host/call-proof':
                     reason = 'credential'

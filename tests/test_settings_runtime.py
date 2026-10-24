@@ -87,6 +87,28 @@ class SettingsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(snapshot['config']['permissions']['research.with.dot']['filesystem']['/private/data'], 'deny')
                 self.assertFalse(snapshot['config']['analytics']['enabled'])
                 self.assertEqual(snapshot['config']['model_providers']['fixture']['env_http_headers']['Authorization'], 'FIXTURE_AUTH')
+                # Native 0.163 accepts both screenshot transports and the
+                # credential mechanisms exposed by the MCP settings form.
+                await write({
+                    'mcp_servers.fixture_stdio.command': 'node',
+                    'mcp_servers.fixture_stdio.args': ['server.js', '--stdio'],
+                    'mcp_servers.fixture_stdio.cwd': str(work),
+                    'mcp_servers.fixture_stdio.env.MCP_TOKEN': 'fixture-stdio-token',
+                    'mcp_servers.fixture_stdio.env_vars': ['HOME', 'PATH'],
+                    'mcp_servers.fixture_http.url': 'https://example.test/mcp',
+                    'mcp_servers.fixture_http.http_headers.Authorization': 'Bearer fixture-http-token',
+                    'mcp_servers.fixture_http.http_headers.X-Client': 'console-fixture',
+                    'mcp_servers.fixture_http.env_http_headers.X-Trace': 'TRACE_ID',
+                    'mcp_servers.fixture_http.tool_timeout_sec': 12.0,
+                })
+                native_config = (await read())['config']['mcp_servers']
+                self.assertEqual(native_config['fixture_stdio']['command'], 'node')
+                self.assertEqual(native_config['fixture_stdio']['args'], ['server.js', '--stdio'])
+                self.assertEqual(native_config['fixture_stdio']['cwd'], str(work))
+                self.assertEqual(native_config['fixture_stdio']['env']['MCP_TOKEN'], 'fixture-stdio-token')
+                self.assertEqual(native_config['fixture_stdio']['env_vars'], ['HOME', 'PATH'])
+                self.assertEqual(native_config['fixture_http']['http_headers']['Authorization'], 'Bearer fixture-http-token')
+                self.assertEqual(native_config['fixture_http']['env_http_headers']['X-Trace'], 'TRACE_ID')
                 # Explicit per-thread updates, unlike config reload, publish settings.
                 await peer.request('thread/settings/update', {'threadId': result['thread']['id'],
                     'approvalPolicy': 'on-request', 'summary': 'concise'})
