@@ -51,7 +51,34 @@ class RecoveryBoundaryTests(unittest.TestCase):
         self.result = {'value': 'a' * (257 * 1024)}
         result = self.registry.call(self.context, 'galatea_get_capabilities', {})
         self.assertEqual(result['error']['category'], 'response-too-large')
+        self.assertFalse(result['error']['state_changed'])
+        self.assertEqual(self.journal.get('call')['state'], 'receipt_saved')
+        self.assertEqual(self.registry.call(self.context, 'galatea_get_capabilities', {}), result)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_large_write_result_remains_unknown(self):
+        self.result = {'value': 'a' * (257 * 1024)}
+        result = self.registry.call(self.context, 'galatea_stop_job',
+            {'project_id': 'project', 'campaign_id': 'campaign', 'operation_id': 'operation', 'reason': 'fixture'})
+        self.assertEqual(result['error']['category'], 'response-too-large')
+        self.assertEqual(result['error']['state_changed'], 'unknown')
         self.assertEqual(self.journal.get('call')['state'], 'unknown')
+        self.registry.reconcile_unknown(lambda _: None)
+        self.assertEqual(self.journal.get('call')['state'], 'unknown')
+
+    def test_saved_oversized_read_failure_is_reconciled_without_reexecution(self):
+        self.result = {'value': 'a' * (257 * 1024)}
+        receipt = self.registry.call(self.context, 'galatea_get_capabilities', {})
+        receipt['error']['state_changed'] = 'unknown'
+        self.journal.transition('call', 'unknown', receipt=receipt)
+        self.registry.reconcile_unknown(lambda _: self.fail('read failure must not be observed again'))
+        record = self.journal.get('call')
+        self.assertEqual(record['state'], 'receipt_saved')
+        self.assertFalse(record['receipt']['ok'])
+        self.assertEqual(record['receipt']['error']['category'], 'response-too-large')
+        self.assertFalse(record['receipt']['error']['state_changed'])
+        self.assertEqual(record['recovered_by'], 'read-only-response-error')
+        self.assertEqual(len(self.calls), 1)
 
     def test_lock_excludes_second_writer_and_stale_file_is_reusable(self):
         path = self.store.root / '.lock'
