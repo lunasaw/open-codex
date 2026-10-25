@@ -170,7 +170,9 @@ class FixtureNative(NativeBridge):
             return {'data': [{'id': 'fixture', 'model': 'fixture-model', 'displayName': 'Fixture model', 'defaultReasoningEffort': 'medium', 'supportedReasoningEfforts': [{'reasoningEffort': v} for v in ['low', 'medium', 'high', 'xhigh', 'ultra']]},
                              {'id': 'alternate', 'model': 'fixture-alternate', 'displayName': 'Alternate model', 'defaultReasoningEffort': 'high', 'supportedReasoningEfforts': [{'reasoningEffort': v} for v in ['medium', 'high']]}]}
         if method == 'config/read':
-            return {'config': {'model': 'fixture-model', 'features': {'shell_tool': True}, 'web_search': 'live'}}
+            return {'config': {'model': 'fixture-model', 'model_provider': 'fixture',
+                               'model_providers': {'fixture': {'name': 'Fixture'}, 'alternate': {'name': 'Alternate'}},
+                               'features': {'shell_tool': True}, 'web_search': 'live'}}
         if method == 'skills/list':
             return {'data': [{'skills': [{'name': 'fixture-skill', 'description': 'Synthetic skill', 'path': '/fixture/SKILL.md', 'enabled': True}]}]}
         if method == 'thread/list':
@@ -265,7 +267,13 @@ class FixtureNative(NativeBridge):
                 return {'dataBase64': base64.b64encode(text.encode()).decode()}
             return {'dataBase64': 'Zml4dHVyZS1maWxl'}
         if method == 'thread/resume':
-            return {'session': await self.host.resume(params['threadId'])}
+            session = await self.host.resume(params['threadId'])
+            if 'modelProvider' in params:
+                if params['modelProvider']:
+                    session.setdefault('settings', {})['modelProvider'] = params['modelProvider']
+                else:
+                    session.setdefault('settings', {}).pop('modelProvider', None)
+            return {'session': session}
         if method == 'thread/name/set':
             self.host.sessions[params['threadId']]['name'] = params['name']
         if method == 'thread/settings/update':
@@ -313,7 +321,7 @@ class BrowserHost(test_console.FakeHost):
         self.sessions[session_id]['status'] = 'closed'
         return self.sessions[session_id]
 
-    async def resume(self, session_id):
+    async def resume(self, session_id, **kwargs):
         self.sessions[session_id]['status'] = 'ready'
         return self.sessions[session_id]
 

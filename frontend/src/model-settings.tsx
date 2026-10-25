@@ -23,6 +23,7 @@ export function ModelSettings({ state }: { state: ConsoleState }) {
   useEffect(() => { if (!session?.active_turn_id) setScope("thread"); }, [session?.active_turn_id]);
   const settings = { ...session?.settings, ...(scope === "turn" ? session?.turn_settings : {}) };
   const [model, setModel] = useState(settings.model || store.composerSettings.model);
+  const [provider, setProvider] = useState(settings.modelProvider || store.composerSettings.modelProvider || defaults.model_provider || "");
   const [effort, setEffort] = useState(settings.effort || store.composerSettings.effort);
   const [tier, setTier] = useState(settings.serviceTier || ""); const [personality, setPersonality] = useState(settings.personality || defaults.personality || "none");
   const [summary, setSummary] = useState(settings.summary || defaults.model_reasoning_summary || "auto");
@@ -46,6 +47,7 @@ export function ModelSettings({ state }: { state: ConsoleState }) {
   useEffect(() => {
     const current = { ...session?.settings, ...(scope === "turn" ? session?.turn_settings : {}) };
     setModel(current.model || store.composerSettings.model); setEffort(current.effort || store.composerSettings.effort);
+    setProvider(current.modelProvider || store.composerSettings.modelProvider || defaults.model_provider || "");
     setSummary(current.summary || defaults.model_reasoning_summary || "auto"); setTier(current.serviceTier || "");
     setReviewer(current.approvalsReviewer || defaults.approvals_reviewer || "user");
     setPersonality(current.personality || defaults.personality || "none");
@@ -55,9 +57,11 @@ export function ModelSettings({ state }: { state: ConsoleState }) {
     setApproval(typeof policy === "string" ? policy : "granular");
     setGranular(typeof policy === "object" ? policy.granular : { sandbox_approval: true, rules: true, mcp_elicitations: true, request_permissions: false, skill_approval: false });
     setSandboxChanged(false); setPreset("");
-  }, [scope, session?.id]);
+  }, [scope, session?.id, defaults.model_provider]);
   const save = async (create = false) => {
     if (!create && scope === "turn" && !session?.active_turn_id) throw new Error("当前回复已结束，请选择后续回复设置");
+    const currentProvider = settings.modelProvider || store.composerSettings.modelProvider || defaults.model_provider || "";
+    if (!create && live && provider !== currentProvider) throw new Error("请在当前回复结束或停止后切换模型服务商");
     const common = { model, ...(effort ? { effort } : {}), summary, serviceTier: tier.trim() || null, approvalsReviewer: reviewer };
     if (live && !create) {
       if (!await store.updateTurnSettings(session!.id, common)) throw new Error(store.state.error || "当前回复设置未应用");
@@ -73,9 +77,13 @@ export function ModelSettings({ state }: { state: ConsoleState }) {
     };
     let threadId = session?.thread_id;
     if (create || !threadId) {
-      const result = await native("thread/start", { cwd, model, ...(profile ? { permissions: profile } : { sandbox }), approvalPolicy: values.approvalPolicy, approvalsReviewer: reviewer });
+      const result = await native("thread/start", { cwd, model, ...(provider ? { modelProvider: provider } : {}), ...(profile ? { permissions: profile } : { sandbox }), approvalPolicy: values.approvalPolicy, approvalsReviewer: reviewer });
       threadId = result.session.thread_id;
       await store.refreshSessions(); await store.select(result.session.id);
+    } else if (provider !== currentProvider) {
+      if (!await store.updateSessionProvider(session!.id, provider || null, values)) throw new Error(store.state.error || "模型服务商切换失败");
+      await store.refreshSessions();
+      return;
     }
     await native("thread/settings/update", { threadId, ...values }); await store.refreshSessions();
   };
@@ -86,6 +94,9 @@ export function ModelSettings({ state }: { state: ConsoleState }) {
       <button role="tab" aria-selected={scope === "thread"} onClick={() => setScope("thread")}>用于后续回复</button></div>}
     {session?.active_turn_id && <p className="muted">{live ? "应用后从当前回复的后续模型调用生效。" : "下次发送消息生效。"}{!switchingEnabled && "如需调整当前回复，请先在“配置”中启用“回复中切换模型与推理强度”，再新建聊天。"}</p>}
     <h4>回复</h4><div className="desktop-settings-group">
+      <SettingRow label="模型服务商"><select aria-label="模型服务商" value={provider} disabled={!!session?.active_turn_id || action.busy || state.settingsBusy}
+        title={session?.active_turn_id ? "请在当前回复结束或停止后切换服务商" : undefined} onChange={(e) => setProvider(e.target.value)}>
+        <option value="">默认服务商</option>{store.modelProviders().map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></SettingRow>
       <SettingRow label="模型"><input aria-label="模型" list="native-models" value={model} onChange={(e) => setModel(e.target.value)} /><datalist id="native-models">{state.models.map((m) => <option key={m.model} value={m.model}>{m.displayName}</option>)}</datalist></SettingRow>
       <SettingRow label="推理强度" description="ultra 使用运行时提供的主动多 Agent 行为。"><Select label="推理强度" value={effort} set={setEffort} options={store.reasoningEfforts(state.models.find((m) => m.model === model), effort)} /></SettingRow>
       <SettingRow label="服务等级" description="留空清除当前等级，由服务端决定。"><input aria-label="服务等级" value={tier} onChange={(e) => setTier(e.target.value)} placeholder="默认" /></SettingRow>

@@ -864,6 +864,80 @@ test("retry preserves original model options even after settings change", async 
   assert.deepEqual(calls[0], calls[1]);
 });
 
+test("provider and model switch together on the original thread and keep settings locked", async () => {
+  const s = make();
+  const session = { id: "a", thread_id: "native-a", status: "ready", settings: { model: "old", modelProvider: "first" } };
+  const other = { id: "b", thread_id: "native-b", status: "ready", settings: { model: "other", modelProvider: "first" } };
+  s.patch({ active: "a", sessions: [session, other] });
+  const result = deferred<Response>(), calls: any[] = [], locks: boolean[] = [];
+  s.subscribe(() => locks.push(s.state.settingsBusy));
+  globalThis.fetch = async (_, init) => {
+    calls.push(JSON.parse(init!.body as string));
+    return calls.length === 1 ? result.promise : json({});
+  };
+  const switching = s.updateComposerSettings({ modelProvider: "second", model: "custom", effort: "high" });
+  assert.equal(s.state.settingsBusy, true);
+  assert.equal(await s.updateComposerSettings({ model: "racing" }), false);
+  s.patch({ active: "b" });
+  result.resolve(json({ session: { ...session, settings: { modelProvider: "second", model: "custom" } } }));
+  assert.equal(await switching, true);
+  assert.deepEqual(calls[0], { method: "thread/resume", params: { threadId: "native-a", modelProvider: "second", model: "custom" } });
+  assert.equal(calls[1].method, "thread/settings/update");
+  assert.equal(calls[1].params.threadId, "native-a");
+  assert.equal(calls[1].params.collaborationMode.settings.model, "custom");
+  assert.ok(locks.slice(0, -1).every(Boolean));
+  assert.equal(s.composerSettings.modelProvider, "first");
+  s.patch({ active: "a" });
+  assert.equal(s.composerSettings.modelProvider, "second");
+  assert.equal(s.composerSettings.effort, "high");
+});
+
+test("failed provider switches never publish an unconfirmed selection", async () => {
+  const s = make();
+  const session = { id: "a", thread_id: "native-a", status: "ready", settings: { model: "old", modelProvider: "first" } };
+  s.patch({ active: "a", sessions: [session] });
+  globalThis.fetch = async (_, init) => init?.body ? json({}) : json([session]);
+  assert.equal(await s.updateSessionProvider("a", "second"), false);
+  assert.equal(s.composerSettings.modelProvider, "first");
+  assert.match(s.state.error, /切换确认/);
+  assert.equal(s.state.settingsBusy, false);
+  globalThis.fetch = async (_, init) => init?.body
+    ? new Response('{"error":"unknown provider"}', { status: 422 }) : json([session]);
+  assert.equal(await s.updateSessionProvider("a", "missing"), false);
+  assert.equal(s.composerSettings.modelProvider, "first");
+});
+
+test("provider changes never detach a running or starting reply", async () => {
+  const s = make();
+  let called = false;
+  globalThis.fetch = async () => { called = true; return json({}); };
+  for (const status of ["starting", "running", "interrupting", "closing", "closed"]) {
+    s.patch({ active: "a", sessions: [{ id: "a", thread_id: "native-a", status, settings: { modelProvider: "first" } }] });
+    assert.equal(await s.updateSessionProvider("a", "second"), false);
+  }
+  assert.equal(called, false);
+});
+
+test("draft provider overrides reach creation and can be reset to native defaults", async () => {
+  const s = make();
+  s.patch({ runtimeDefaults: { model_provider: "first", model_providers: { first: { name: "First" }, second: { name: "Second" } } } });
+  const creates: any[] = [];
+  globalThis.fetch = async (_, init) => {
+    if (!init?.body) return json(s.state.sessions);
+    const { options } = JSON.parse(init.body as string);
+    creates.push(options);
+    return json({ id: "created-" + creates.length, thread_id: "thread-" + creates.length, status: "ready", settings: options });
+  };
+  assert.equal(await s.updateComposerSettings({ modelProvider: "second", model: "custom" }), true);
+  await s.create(false);
+  assert.equal(creates[0].modelProvider, "second");
+  assert.equal(creates[0].model, "custom");
+  await s.updateComposerSettings({ modelProvider: "" });
+  await s.create(false);
+  assert.equal("modelProvider" in creates[1], false);
+  assert.ok(s.modelProviders().some(provider => provider.id === "second" && provider.name === "Second"));
+});
+
 test("switching back to a thread refreshes its active turn before composing", async () => {
   const s = make();
   s.patch({ sessions: [{ id: "a", status: "ready", thread_id: "native-a" }] });

@@ -18,6 +18,7 @@ npm run test:browser
 node ../tests/test_native_browser.cjs
 node ../tests/test_settings_browser.cjs
 node ../tests/test_reasoning_settings_browser.cjs
+node ../tests/test_model_provider_browser.cjs
 node ../tests/test_native_completion_browser.cjs
 node ../tests/test_subagents_browser.cjs
 node --test src/markdown-math.browser.cjs
@@ -63,6 +64,16 @@ node ../tests/test_apps_launch_browser.cjs
 “只改当前回复”使用 `turn/settings/update`，需先在“配置 → 模型与运行设置”启用
 “回复中切换模型与推理强度”并新建聊天；已有聊天不会因配置保存或重载立即获得该能力。
 用例同时检查开关的版本化配置保存、旧聊天拒绝时的说明、当前回复与后续设置隔离，以及手机和深色布局。
+
+`test_model_provider_browser.cjs` 验证服务商快速选择、与自定义模型一起应用、刷新后保留、
+失败时保持原选择，以及回复进行中的保护与手机布局。`test_model_provider.py` 验证恢复事务、
+权限/计划/Conda 保留、空聊天和超时不回退。以下隔离测试使用真实原生二进制和本地模拟
+Responses 服务，验证请求实际切换地址、无效服务商回退、切回默认及重启后继续使用所选服务商：
+
+```sh
+CODEX_SETTINGS_TEST_BINARY=/absolute/path/codex \
+  python -m unittest discover -s tests -p 'test_model_provider_runtime.py'
+```
 
 `configuration-data.test.ts` 和 `store.test.ts` 验证最小配置补丁、推理档位显示、
 项目默认值继承、显式会话覆盖和读取竞争；`test_host_core.py` 验证原生有效设置的持久化。
