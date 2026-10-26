@@ -62,7 +62,7 @@
 | P1 | Memory `memories` | 会话 enabled/disabled、全局 reset | 14 个源码字段：抽取/归并模型、生成/使用、保留/过滤/速率限制、external context、版本等；还未读取 `memory/status` 的 v2Ready/v2ConsolidatedThreads |
 | P1 | Hooks `hooks` | 清单和执行记录可看 | 12 类事件及 state 的设置、启停/信任流程；应通过已有配置写入能力实现，不虚构不存在的 Hook CRUD RPC |
 | P1 | Apps / 插件 / Skills | 安装、连接、启停或目录已有 | Apps 默认/app/link/tool 级权限、审批与危险操作策略；plugins 默认/逐插件策略、thread disabledPluginIds；skills bundled/include_instructions/max_context_tokens |
-| P1 | MCP 与认证策略 | 服务配置 JSON 新建/替换、OAuth 和重载已有 | 读取已有配置后编辑/删除/继承及冲突处理的完整流程；enterprise managed auth、凭据存储、回调地址/端口、启动 grace；JSON 可输入不等于完全不支持字段 |
+| P1 | MCP 与认证策略 | 逐服务器结构化编辑、删除、启停、版本冲突、STDIO/HTTP 字段、Token 环境变量、直接 Token、OAuth、HTTP 标头和重载 | enterprise managed auth、凭据存储、回调地址/端口、启动 grace、工具策略和其他高级字段仍通过完整原生配置编辑器管理 |
 | P1 | 自动审查 `auto_review` | reviewer 选择、Guardian 卡片 | policy/extra_policy、模板、上下文限制、circuit_break_action；review_model 默认值 |
 | P1 | Shell 和工具行为 | inherit/include_only/exclude/set；工具调用流程已有 | ignore_default_excludes、filters、experimental_use_profile、allow_login_shell；tools、tool_suggest、输出限制和后台终端最大超时 |
 | P1 | 指令与项目上下文 | developer_instructions、model_instructions_file | compact_prompt、project_doc_max_bytes/fallback_filenames、project_root_markers、include_* 上下文开关、projects trust_level；项目 RPC CRUD 不等于 config projects 信任设置 |
@@ -233,7 +233,7 @@
 | `mcp_oauth_callback_url` | 缺少专用设置 |  |
 | `mcp_oauth_credentials_store` | 缺少专用设置 |  |
 | `mcp_optional_startup_grace_ms` | 缺少专用设置 |  |
-| `mcp_servers` | 部分支持 | JSON 配置可达，但无逐服务器结构化编辑/删除/环境/权限/超时完整工作流 |
+| `mcp_servers` | 部分支持 | MCP 设置页已提供逐服务器传输、环境、凭证、启停、删除和重载；工具策略、超时、企业认证及其他高级字段仍未全部结构化 |
 | `memories` | 查看/关联已有，设置不全 | 仅会话模式/全局 reset；generate/use、模型、过滤/保留等全局字段缺失 |
 | `model` | 有字段编辑器 |  |
 | `model_auto_compact_token_limit` | 有字段编辑器 |  |

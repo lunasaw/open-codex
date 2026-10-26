@@ -108,6 +108,7 @@ import "./workbench.css";
 import "./desktop.css";
 import "./settings-shell.css";
 import "./settings-content.css";
+import "./mcp-config.css";
 
 const suggestions = [
   {

@@ -244,10 +244,12 @@ if __name__ == '__main__': raise SystemExit(main())
                 self.assertEqual(json.loads(raw)['model'], 'gpt-image-2.5-flare')
 
     def file_config(self, **changes):
+        binary = self.root / 'codex-fixture'
+        binary.write_text('fixture runtime\n')
         return AgentConfig.from_dict({
             'schema_version': 'codex-agent/v2',
             'paths': {'codex_home': 'home', 'runtime_dir': 'runtime', 'state_dir': 'state', 'workspace_dir': 'workspace'},
-            'codex': {'binary': '/usr/bin/true', 'runtime_version': 'codex-cli 0.163.0'},
+            'codex': {'binary': str(binary), 'runtime_version': 'codex-cli 0.163.0'},
             'image_generation': {'enabled': True, 'connection': 'custom', 'base_url': 'http://images.example/v1/',
                                  'api_key_file': 'chat-key', **changes},
         }, self.root)
