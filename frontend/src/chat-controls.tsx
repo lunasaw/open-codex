@@ -134,9 +134,11 @@ export function ComposerOptions() {
   const session = state.sessions.find((s) => s.id === state.active);
   const model = state.models.find((m) => m.model === settings.model);
   const efforts = store.reasoningEfforts(model, settings.effort);
+  const providers = store.modelProviders();
   const [open, setOpen] = useState(false);
   const [index, setIndex] = useState(0);
-  const disabled = state.settingsBusy || state.submitting;
+  const disabled = state.settingsBusy || state.submitting || state.creating;
+  const providerDisabled = disabled || !!session?.active_turn_id || !!(session && busyStatuses.has(session.status)) || session?.status === "closed";
   const label = model?.displayName || settings.model || "默认模型";
   useEffect(() => setIndex(Math.max(0, efforts.indexOf(settings.effort))), [settings.model, settings.effort, open, efforts.join(",")]);
   useEffect(() => {
@@ -164,6 +166,14 @@ export function ComposerOptions() {
               void store.updateComposerSettings({ model: item.model, ...(effort ? { effort } : {}) });
             }}>{item.displayName || item.model}{item.model === settings.model && <Check className="ml-auto" />}</DropdownMenuItem>)}
             <DropdownMenuSeparator /><DropdownMenuItem onSelect={() => { setOpen(false); openSettings("session:settings"); }}>模型设置…</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <DropdownMenu><DropdownMenuTrigger asChild><button type="button" className="reasoning-model" aria-label="选择模型服务商" disabled={providerDisabled}
+          title={providerDisabled ? "请在当前回复结束或停止后切换服务商" : settings.modelProvider}><span>{providers.find((item) => item.id === settings.modelProvider)?.name || settings.modelProvider || "默认服务商"}</span><ChevronRight size={12} /></button></DropdownMenuTrigger>
+          <DropdownMenuContent side="top" align="center" className="min-w-56"><DropdownMenuLabel>模型服务商</DropdownMenuLabel>
+            <DropdownMenuItem disabled={!!session?.active_turn_id} onSelect={() => void store.updateComposerSettings({ modelProvider: "" })}>默认服务商{!settings.modelProvider && <Check className="ml-auto" />}</DropdownMenuItem>
+            {providers.filter((item) => item.id !== "").map((item) => <DropdownMenuItem key={item.id} disabled={!!session?.active_turn_id} onSelect={() => void store.updateComposerSettings({ modelProvider: item.id })}>{item.name}{item.id === settings.modelProvider && <Check className="ml-auto" />}</DropdownMenuItem>)}
+            <DropdownMenuSeparator /><DropdownMenuItem onSelect={() => { setOpen(false); openSettings("configuration"); }}>服务商配置…</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
         {efforts.length > 0 ? <Slider.Root className="reasoning-slider" min={0} max={Math.max(1, efforts.length - 1)} step={1} value={[index]}

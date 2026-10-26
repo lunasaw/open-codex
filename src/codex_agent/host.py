@@ -503,6 +503,14 @@ class AgentHost:
             raise ResumeRejected('session state changed', code='session-state-changed')
         if session['status'] == 'closed':
             raise ResumeRejected('session closed', code='session-closed')
+        options = dict(options or {})
+        if options:
+            if set(options) & {'threadId', 'history', 'path'}:
+                raise ValueError('resume a Host session by its thread identity')
+            PROTOCOL.validate(PROTOCOL.schema('thread/resume'), {'threadId': session['thread_id'], **options})
+            if session.get('active_request_id') or session.get('active_turn_id') or session['status'] in {
+                    'starting', 'running', 'interrupting', 'closing'}:
+                raise ResumeRejected('turn still active', code='session-turn-active')
         mismatches = {k for k, v in self.bindings.items() if session.get(k) != v}
         extension_drift = mismatches == {'extensions_sha256'}
         if mismatches and not (extension_drift and self.extension_rebinder):
@@ -529,8 +537,8 @@ class AgentHost:
             # discard its only live state. Do not invent a user turn.
             empty_history = ('is not materialized yet' in str(exc) or
                              str(exc) == 'list_turns is not supported yet')
-            changing_environment = conda_prefix is not _UNCHANGED or session.get('conda_environment')
-            if not (changing_environment and empty_history and session_id in self._attached
+            reloading = bool(options) or conda_prefix is not _UNCHANGED or session.get('conda_environment')
+            if not (reloading and empty_history and session_id in self._attached
                     and not session.get('active_request_id') and not session.get('active_turn_id')):
                 raise
             metadata = (await self.client.peer.request('thread/read', {
@@ -562,35 +570,102 @@ class AgentHost:
         reload_environment = (conda_prefix is not _UNCHANGED or bool(session.get('conda_environment'))
                               or session.get('environment_reload_required', False))
         saved_settings = copy.deepcopy(session.get('settings', {}))
-        if reload_environment:
+        # Provider overrides require reloading the native thread. Preserve its
+        # explicit settings, including provider selection after a Host restart.
+        detach_for_resume = reload_environment or bool(options)
+        resume_fields = PROTOCOL.schema('thread/resume')['definitions']['ThreadResumeParams']['properties']
+        saved_options = {k: v for k, v in saved_settings.items() if k in resume_fields and k not in {
+            'threadId', 'history', 'path', 'excludeTurns', 'initialTurnsPage'}}
+        resume_options = {**saved_options, **options} if detach_for_resume or session_id not in self._attached else {}
+        if 'config' in options:
+            resume_options['config'] = {**(saved_options.get('config') or {}), **(options['config'] or {})}
+        if 'modelProvider' in options and not options['modelProvider']:
+            config = await self.client.peer.request('config/read', {
+                'includeLayers': False, 'cwd': options.get('cwd') or session.get('cwd')})
+            resume_options['modelProvider'] = config.get('config', {}).get('model_provider') or 'openai'
+        fields = PROTOCOL.schema('thread/settings/update')['definitions']['ThreadSettingsUpdateParams']['properties']
+        restored_settings = {k: v for k, v in saved_settings.items() if k in fields and k != 'threadId'}
+        if restored_settings.get('permissions'):
+            restored_settings.pop('sandboxPolicy', None)
+        previous_environment = session.get('conda_environment')
+        previous_variables = self._conda_environments.get(session_id)
+        if detach_for_resume:
             prefix = (session.get('conda_environment') or {}).get('prefix') if conda_prefix is _UNCHANGED else conda_prefix
-            environment, variables = await asyncio.to_thread(activate_environment, prefix)
-            resume_schema = PROTOCOL.schema('thread/resume')
-            resume_fields = resume_schema['definitions']['ThreadResumeParams']['properties']
-            options = {**{k: v for k, v in saved_settings.items() if k in resume_fields}, **(options or {})}
-            config = dict(options.get('config') or {})
-            if environment:
-                native_config = await self.client.peer.request('config/read', {'includeLayers': False, 'cwd': session.get('cwd')})
-                excludes = (native_config.get('config', {}).get('shell_environment_policy') or {}).get('exclude') or []
-                config = runtime_overrides(config, variables, excludes=excludes)
-            options['config'] = config
+            if reload_environment:
+                environment, variables = await asyncio.to_thread(activate_environment, prefix)
+                config = dict(resume_options.get('config') or {})
+                if environment:
+                    native_config = await self.client.peer.request('config/read', {'includeLayers': False, 'cwd': session.get('cwd')})
+                    excludes = (native_config.get('config', {}).get('shell_environment_policy') or {}).get('exclude') or []
+                    config = runtime_overrides(config, variables, excludes=excludes)
+                resume_options['config'] = config
             # Native resume only reloads an idle thread with overrides after
             # this connection unsubscribes. Persist intent before detaching.
-            session.update(status='recovery_required', conda_environment=environment, environment_reload_required=True)
+            session.update(status='recovery_required')
+            if reload_environment:
+                session.update(conda_environment=environment, environment_reload_required=True)
             self._save(session)
             self._attached.discard(session_id)
-            self._conda_environments.pop(session_id, None)
+            if reload_environment:
+                self._conda_environments.pop(session_id, None)
             await self.client.peer.request('thread/unsubscribe', {'threadId': session['thread_id']})
-        await self.client.resume(session['thread_id'], **({'options': options} if options else {}))
+        try:
+            resume_result = await self.client.resume(session['thread_id'], **({'options': resume_options} if resume_options else {}))
+        except RpcError:
+            # Only a definite rejection is safe to roll back. A timeout may
+            # already have applied the override and requires reconciliation.
+            if detach_for_resume:
+                try:
+                    restore_options = copy.deepcopy(saved_options)
+                    if previous_variables:
+                        restore_options['config'] = runtime_overrides(restore_options.get('config') or {}, previous_variables)
+                    await self.client.resume(session['thread_id'], **({'options': restore_options} if restore_options else {}))
+                    if restored_settings:
+                        await self.client.peer.request('thread/settings/update', {'threadId': session['thread_id'], **restored_settings})
+                    session.update(status='ready', settings=saved_settings, conda_environment=previous_environment,
+                                   active_turn_id=None, active_request_id=None)
+                    if previous_variables is not None:
+                        self._conda_environments[session_id] = previous_variables
+                    session.pop('environment_reload_required', None)
+                    self._save(session)
+                    self._attached.add(session_id)
+                    self._active_turns = self._count_active_turns()
+                except Exception:
+                    pass
+            raise
+        effective = resume_result if isinstance(resume_result, dict) else {}
+        visible_settings = copy.deepcopy(saved_settings)
+        for key in ('model', 'modelProvider', 'approvalPolicy', 'approvalsReviewer', 'permissions', 'cwd'):
+            if key in effective:
+                visible_settings[key] = effective[key]
+        if 'reasoningEffort' in effective:
+            visible_settings['effort'] = effective['reasoningEffort']
+        if isinstance(effective.get('sandbox'), dict):
+            visible_settings['sandboxPolicy'] = effective['sandbox']
+            visible_settings.pop('sandbox', None)
+        if detach_for_resume or session_id not in self._attached:
+            restored_settings.update({k: visible_settings[k] for k in options if k in fields and k in visible_settings})
+            if 'sandbox' in options and 'sandboxPolicy' in visible_settings:
+                restored_settings['sandboxPolicy'] = visible_settings['sandboxPolicy']
+            if 'config' in options and 'model_reasoning_effort' in (options['config'] or {}):
+                restored_settings['effort'] = visible_settings.get('effort')
+            collaboration = restored_settings.get('collaborationMode')
+            if collaboration:
+                collaboration['settings'].update(model=visible_settings.get('model', collaboration['settings']['model']),
+                    reasoning_effort=restored_settings.get('effort', collaboration['settings'].get('reasoning_effort')))
+            if restored_settings.get('permissions'):
+                restored_settings.pop('sandboxPolicy', None)
+            if restored_settings:
+                await self.client.peer.request('thread/settings/update', {'threadId': session['thread_id'], **restored_settings})
+                visible_settings.update(restored_settings)
         if reload_environment:
-            fields = PROTOCOL.schema('thread/settings/update')['definitions']['ThreadSettingsUpdateParams']['properties']
-            settings = {k: v for k, v in saved_settings.items() if k in fields and k != 'threadId'}
-            if settings.get('permissions'):
-                settings.pop('sandboxPolicy', None)
-            if settings:
-                await self.client.peer.request('thread/settings/update', {'threadId': session['thread_id'], **settings})
             self._conda_environments[session_id] = variables
             session.pop('environment_reload_required', None)
+        # Never display an unconfirmed requested provider as successfully bound.
+        if options.get('modelProvider') and effective.get('modelProvider') != options['modelProvider']:
+            raise HostNotReady('native provider switch was not confirmed')
+        session['settings'] = visible_settings
+        session['cwd'] = visible_settings.get('cwd', session.get('cwd'))
         if self.configuration_changed:
             await self.configuration_changed()
             session.update(self.bindings)

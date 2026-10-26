@@ -188,7 +188,7 @@ export type ConsoleState = {
     supportedReasoningEfforts?: Array<{ reasoningEffort: string }>;
     defaultReasoningEffort?: string;
   }>;
-  preferences: { model: string; effort: string; mode: string };
+  preferences: { model: string; modelProvider?: string; effort: string; mode: string };
   settingsBusy: boolean;
   goalInputs: Record<string, boolean>;
   goalRevision: number;
@@ -209,7 +209,7 @@ export class ConsoleStore {
   private projectCatalogReady = false;
   private projectWrites: Promise<boolean> = Promise.resolve(true);
   private pendingProjectWrites = 0;
-  private defaults = { model: "", effort: "medium", mode: "default" };
+  private defaults = { model: "", modelProvider: "", effort: "medium", mode: "default" };
   private draftModelOverrides = new Set<string>();
   private listeners = new Set<() => void>();
   private controller?: AbortController;
@@ -257,7 +257,7 @@ export class ConsoleStore {
     nativeRequests: [],
     nativeProtocol: null,
     models: [],
-    preferences: { model: "", effort: "medium", mode: "default" },
+    preferences: { model: "", modelProvider: "", effort: "medium", mode: "default" },
     settingsBusy: false,
     goalInputs: {},
     goalRevision: 0,
@@ -382,6 +382,7 @@ export class ConsoleStore {
         if (signal.aborted || revision !== this.defaultsRevision) return;
         this.defaults = {
           model: config.config?.model || "",
+          modelProvider: config.config?.model_provider || "",
           effort: config.config?.model_reasoning_effort || "medium",
           mode: "default",
         };
@@ -396,10 +397,11 @@ export class ConsoleStore {
     const previous = this.defaults;
     const result = await this.nativeCall("config/read", { includeLayers: false, ...(cwd ? { cwd } : {}) }) as any;
     if (revision !== this.defaultsRevision) return;
-    this.defaults = { model: result.config?.model || "", effort: result.config?.model_reasoning_effort || "medium", mode: "default" };
+    this.defaults = { model: result.config?.model || "", modelProvider: result.config?.model_provider || "", effort: result.config?.model_reasoning_effort || "medium", mode: "default" };
     const preferences = this.state.preferences;
     this.patch({ runtimeDefaults: result.config || {}, preferences: { ...preferences,
       ...(!this.draftModelOverrides.has("model") && preferences.model === previous.model ? { model: this.defaults.model } : {}),
+      ...(!this.draftModelOverrides.has("modelProvider") && preferences.modelProvider === previous.modelProvider ? { modelProvider: this.defaults.modelProvider } : {}),
       ...(!this.draftModelOverrides.has("effort") && preferences.effort === previous.effort ? { effort: this.defaults.effort } : {}),
     } });
   }
@@ -690,6 +692,39 @@ export class ConsoleStore {
       this.patch({ settingsBusy: false });
     }
   }
+  async updateSessionProvider(id: string, provider: string | null, settings: Record<string, unknown> = {}) {
+    const session = this.state.sessions.find((s) => s.id === id);
+    if (this.state.settingsBusy || this.state.submitting || this.state.creating)
+      return false;
+    if (!session?.thread_id || session.status === 'closed' || session.active_turn_id || busyStatuses.has(session.status)) {
+      this.fail(new Error("请在当前回复结束后切换模型服务商"));
+      return false;
+    }
+    this.patch({ settingsBusy: true, error: "" });
+    try {
+      const result = await this.nativeCall("thread/resume", {
+        threadId: session.thread_id,
+        modelProvider: provider,
+        ...(typeof settings.model === "string" ? { model: settings.model } : {}),
+      }) as any;
+      const updated = result?.session;
+      if (updated?.id !== id || updated.thread_id !== session.thread_id)
+        throw new Error("未收到服务商切换确认，请刷新会话状态");
+      this.patch({ sessions: this.state.sessions.map((s) => s.id === id ? updated : s) });
+      if (Object.keys(settings).length) {
+        await this.nativeCall("thread/settings/update", { threadId: session.thread_id, ...settings });
+        this.patch({ sessions: this.state.sessions.map((s) => s.id === id
+          ? { ...s, settings: mergeSessionSettings(s.settings, settings) } : s) });
+      }
+      return true;
+    } catch (error) {
+      if (this.state.active === id) this.fail(error);
+      await this.refreshSessions().catch((error) => { if (this.state.active === id) this.fail(error); });
+      return false;
+    } finally {
+      this.patch({ settingsBusy: false });
+    }
+  }
   async chooseProject(projectId: string) {
     if (this.state.settingsBusy || this.state.submitting || this.state.creating)
       return false;
@@ -731,6 +766,21 @@ export class ConsoleStore {
   get composerSettings() {
     return this.settingsForSession(this.state.active);
   }
+  modelProviders() {
+    const configured = this.state.runtimeDefaults.model_providers;
+    const providers = new Map<string, { id: string; name: string }>();
+    if (configured && typeof configured === "object") {
+      for (const [id, value] of Object.entries(configured)) {
+        const name = value && typeof value === "object" && typeof (value as any).name === "string"
+          ? (value as any).name : id;
+        providers.set(id, { id, name });
+      }
+    }
+    for (const id of [this.state.runtimeDefaults.model_provider, this.composerSettings.modelProvider, "openai"]) {
+      if (typeof id === "string" && id && !providers.has(id)) providers.set(id, { id, name: id });
+    }
+    return [...providers.values()];
+  }
   private settingsForSession(id: string | null) {
     const session = this.state.sessions.find(
       (s) => s.id === id,
@@ -742,6 +792,11 @@ export class ConsoleStore {
         settings?.collaborationMode?.settings?.model ||
         settings?.model ||
         fallback.model,
+      modelProvider:
+        settings?.modelProvider ||
+        fallback.modelProvider ||
+        this.state.runtimeDefaults.model_provider ||
+        "",
       effort:
         settings?.collaborationMode?.settings?.reasoning_effort ||
         settings?.effort ||
@@ -755,14 +810,20 @@ export class ConsoleStore {
     const next = { ...this.composerSettings, ...update };
     const session = this.state.sessions.find((s) => s.id === this.state.active);
     if (!session) {
-      for (const key of ["model", "effort"]) if (key in update) this.draftModelOverrides.add(key);
+      for (const key of ["model", "modelProvider", "effort"]) if (key in update) this.draftModelOverrides.add(key);
       this.patch({ preferences: next, ...(update.mode === "plan" ? { goalInputs: { ...this.state.goalInputs, new: false } } : {}) });
       return true;
+    }
+    if (session.active_turn_id && update.modelProvider !== undefined) {
+      this.fail(new Error("请在当前回复结束或停止后切换模型服务商"));
+      return false;
     }
     if (session.active_turn_id && update.mode !== undefined) {
       this.fail(new Error("工作模式将在当前回复结束后才能切换"));
       return false;
     }
+    if (update.modelProvider !== undefined && update.modelProvider !== this.settingsForSession(session.id).modelProvider)
+      return this.updateSessionProvider(session.id, update.modelProvider || null, this.turnOptions(next));
     this.patch({ settingsBusy: true });
     try {
       if (update.mode === "plan" && update.effort === undefined && this.state.nativeProtocol?.methods.includes("config/read")) {
@@ -1026,9 +1087,10 @@ export class ConsoleStore {
     this.actions.set("create", key);
     try {
       if (this.state.nativeProtocol?.methods.includes("config/read")) await this.refreshRuntimeDefaults(this.currentProject?.path || this.state.draftCwd || this.state.nativeProtocol.cwd);
-      const { model, effort, mode } = this.state.preferences;
+      const { model, modelProvider, effort, mode } = this.state.preferences;
       // Only explicit draft changes override project/native defaults.
       const modelOverride = model && (this.draftModelOverrides.has("model") || model !== this.defaults.model);
+      const providerOverride = modelProvider && (this.draftModelOverrides.has("modelProvider") || modelProvider !== this.defaults.modelProvider);
       const effortOverride = this.draftModelOverrides.has("effort") || effort !== this.defaults.effort;
       const project = this.currentProject;
       const options = {
@@ -1038,6 +1100,7 @@ export class ConsoleStore {
           ? permissionSettings(this.state.draftPermission, true)
           : {}),
         ...(modelOverride ? { model } : {}),
+        ...(providerOverride ? { modelProvider } : {}),
         ...(effortOverride ? { config: { model_reasoning_effort: effort } } : {}),
       };
       const session = await api<Session>("/api/sessions", { options }, key);
@@ -1059,7 +1122,7 @@ export class ConsoleStore {
       } else if (mode === "plan") {
         const inherited = session.settings || {};
         await this.nativeCall("thread/settings/update", { threadId: session.thread_id, ...this.turnOptions({
-          model: inherited.model || model, effort: effortOverride ? effort : this.state.runtimeDefaults.plan_mode_reasoning_effort || inherited.effort || effort, mode,
+          model: inherited.model || model, modelProvider: inherited.modelProvider || modelProvider, effort: effortOverride ? effort : this.state.runtimeDefaults.plan_mode_reasoning_effort || inherited.effort || effort, mode,
         }) });
       }
       this.actions.delete("create");

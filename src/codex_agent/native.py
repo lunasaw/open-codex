@@ -186,7 +186,8 @@ class NativeBridge:
                 future.set_result({'error': {'code': -32000, 'message': 'Request cancelled'}})
 
     async def call(self, method, params, request_id):
-        if method in {'thread/fork', 'thread/archive', 'thread/unarchive', 'thread/delete', 'thread/revert'}:
+        if method in {'thread/fork', 'thread/archive', 'thread/unarchive', 'thread/delete', 'thread/revert',
+                      'thread/settings/update'}:
             async with self.host._admission:
                 return await self._call(method, params, request_id)
         return await self._call(method, params, request_id)
